@@ -66,9 +66,9 @@ jobs:
             echo "::warning::SONAR_TOKEN secret not set yet — skipping SonarCloud analysis."
           fi
 
-      - name: Install Ninja and pkg-config
+      - name: Install Ninja, pkg-config and gcovr
         if: steps.sonar-check.outputs.configured == 'true'
-        run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config
+        run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config gcovr
 
       - name: Cache vcpkg archives
         if: steps.sonar-check.outputs.configured == 'true'
@@ -88,11 +88,19 @@ jobs:
 
       - name: Configure
         if: steps.sonar-check.outputs.configured == 'true'
-        run: cmake --preset linux
+        run: cmake --preset linux -DCRIMP_ENABLE_COVERAGE=ON
 
       - name: Run Build Wrapper (captures compile commands for Sonar)
         if: steps.sonar-check.outputs.configured == 'true'
         run: build-wrapper-linux-x86-64 --out-dir ${{ env.BUILD_WRAPPER_OUT_DIR }} cmake --build build
+
+      - name: Run tests (generates gcov coverage data)
+        if: steps.sonar-check.outputs.configured == 'true'
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Generate coverage report
+        if: steps.sonar-check.outputs.configured == 'true'
+        run: gcovr --root . --filter 'src/' --sonarqube coverage.xml
 
       - name: SonarQube Cloud Scan
         if: steps.sonar-check.outputs.configured == 'true'
@@ -102,3 +110,4 @@ jobs:
         with:
           args: >
             --define sonar.cfamily.compile-commands=${{ env.BUILD_WRAPPER_OUT_DIR }}/compile_commands.json
+            --define sonar.coverageReportPaths=coverage.xml

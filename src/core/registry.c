@@ -1,4 +1,4 @@
-#include "registry.h"
+#include "crimp/registry.h"
 
 void crimp_registry_init(crimp_registry *reg) {
     reg->count = 0;

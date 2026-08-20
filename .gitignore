@@ -8,6 +8,8 @@ vcpkg_installed/
 spike/*.log
 spike/firmware-extract/samples/
 test_fixture_*/
+test_sbom_output.json
+sbom.cdx.json
 *.o
 *.obj
 *.exe

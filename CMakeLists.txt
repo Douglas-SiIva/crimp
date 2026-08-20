@@ -4,6 +4,12 @@ project(crimp LANGUAGES C CXX)
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+option(CRIMP_ENABLE_COVERAGE "Instrument builds with gcov for coverage reporting" OFF)
+if(CRIMP_ENABLE_COVERAGE)
+    add_compile_options(--coverage -O0)
+    add_link_options(--coverage)
+endif()
+
 find_package(capstone CONFIG REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(UNICORN REQUIRED IMPORTED_TARGET unicorn)
@@ -17,6 +23,8 @@ add_library(crimp STATIC
     src/core/binstring.c
     src/core/inventory.c
     src/core/component_identify.c
+    src/core/sbom.c
+    src/core/scan.c
     src/extract/identify.c
     src/extract/squashfs.c
     src/detectors/weak_credentials.c
@@ -45,6 +53,14 @@ add_test(NAME weak_crypto COMMAND test_weak_crypto)
 add_executable(test_component_identify tests/core/test_component_identify.c)
 target_link_libraries(test_component_identify PRIVATE crimp)
 add_test(NAME component_identify COMMAND test_component_identify)
+
+add_executable(test_sbom tests/core/test_sbom.c)
+target_link_libraries(test_sbom PRIVATE crimp)
+add_test(NAME sbom COMMAND test_sbom)
+
+add_executable(test_scan tests/core/test_scan.c)
+target_link_libraries(test_scan PRIVATE crimp)
+add_test(NAME scan COMMAND test_scan)
 
 add_executable(spike_capstone_test spike/capstone-test/test_disasm.c)
 target_link_libraries(spike_capstone_test PRIVATE capstone::capstone)
