@@ -1,0 +1,10 @@
+title = "Crimp gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Detector source intentionally contains secret-pattern strings to search for (that's the detector's job, not a leaked secret)."
+paths = [
+  '''src/detectors/.*''',
+]

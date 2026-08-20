@@ -1,0 +1,6 @@
+name: "Crimp CodeQL config"
+
+paths-ignore:
+  # Test fixtures intentionally write fake secret-shaped content to
+  # temp files to exercise detectors — not a real cleartext-storage bug.
+  - tests/**

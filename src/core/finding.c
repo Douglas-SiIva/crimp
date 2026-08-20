@@ -1,6 +1,7 @@
 #include "crimp/detector.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 #define INITIAL_CAPACITY 16
 
@@ -19,12 +20,15 @@ void crimp_finding_list_add(crimp_finding_list *list, const char *detector_name,
     }
 
     crimp_finding *f = &list->items[list->count++];
-    f->detector_name = detector_name;
-    f->description = description;
+    f->detector_name = detector_name; /* detector names are string literals, not owned */
+    f->description = strdup(description);
     f->severity = severity;
 }
 
 void crimp_finding_list_free(crimp_finding_list *list) {
+    for (size_t i = 0; i < list->count; i++) {
+        free((void *)list->items[i].description);
+    }
     free(list->items);
     list->items = NULL;
     list->count = 0;
