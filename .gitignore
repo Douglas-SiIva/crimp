@@ -1,0 +1,16 @@
+.claude/
+CLAUDE.md
+AGENTS.md
+
+build/
+vcpkg_installed/
+.tools/
+spike/*.log
+*.o
+*.obj
+*.exe
+*.a
+*.lib
+*.dll
+.vs/
+.cache/
