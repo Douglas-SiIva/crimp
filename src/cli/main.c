@@ -1,7 +1,5 @@
-#include "crimp/detectors.h"
 #include "crimp/extract.h"
-#include "crimp/inventory.h"
-#include "crimp/registry.h"
+#include "crimp/scan.h"
 #include "crimp/sbom.h"
 
 #include <stdio.h>
@@ -31,41 +29,30 @@ static int is_directory(const char *path) {
 }
 
 static void scan_directory(const char *root_path) {
-    crimp_registry reg;
-    crimp_registry_init(&reg);
-    crimp_registry_add(&reg, &crimp_detector_weak_credentials);
-    crimp_registry_add(&reg, &crimp_detector_exposed_protocols);
-    crimp_registry_add(&reg, &crimp_detector_weak_crypto);
+    crimp_scan_result result;
+    crimp_scan_result_init(&result);
+    crimp_scan_directory(root_path, &result);
 
-    crimp_finding_list findings;
-    crimp_finding_list_init(&findings);
-    crimp_registry_run_all(&reg, root_path, &findings);
-
-    printf("=== Findings (%zu) ===\n", findings.count);
-    for (size_t i = 0; i < findings.count; i++) {
-        printf("[%s] %s: %s\n", severity_name(findings.items[i].severity),
-               findings.items[i].detector_name, findings.items[i].description);
+    printf("=== Findings (%zu) ===\n", result.findings.count);
+    for (size_t i = 0; i < result.findings.count; i++) {
+        printf("[%s] %s: %s\n", severity_name(result.findings.items[i].severity),
+               result.findings.items[i].detector_name, result.findings.items[i].description);
     }
 
-    crimp_component_list components;
-    crimp_component_list_init(&components);
-    crimp_identify_components(root_path, &components);
-
-    printf("\n=== Components identified (%zu) ===\n", components.count);
-    for (size_t i = 0; i < components.count; i++) {
-        printf("%s %s (%s)\n", components.items[i].component, components.items[i].version,
-               components.items[i].path);
+    printf("\n=== Components identified (%zu) ===\n", result.components.count);
+    for (size_t i = 0; i < result.components.count; i++) {
+        printf("%s %s (%s)\n", result.components.items[i].component,
+               result.components.items[i].version, result.components.items[i].path);
     }
 
     FILE *sbom_file = fopen("sbom.cdx.json", "wb");
     if (sbom_file) {
-        crimp_sbom_write_cyclonedx(&components, sbom_file);
+        crimp_sbom_write_cyclonedx(&result.components, sbom_file);
         fclose(sbom_file);
         printf("\nSBOM written to sbom.cdx.json\n");
     }
 
-    crimp_component_list_free(&components);
-    crimp_finding_list_free(&findings);
+    crimp_scan_result_free(&result);
 }
 
 static void identify_firmware(const char *path) {
