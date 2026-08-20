@@ -1,56 +1,27 @@
 #include "crimp/detectors.h"
 
-#include "core/fileutil.h"
-#include "core/walk.h"
+#include "core/pattern_scan.h"
 
-#include <stdio.h>
-#include <string.h>
-
-#define READ_CHUNK 65536
-
-static const char *PRIVATE_KEY_MARKERS[] = {
-    "-----BEGIN RSA PRIVATE KEY-----",
-    "-----BEGIN OPENSSH PRIVATE KEY-----",
-    "-----BEGIN EC PRIVATE KEY-----",
-    "-----BEGIN DSA PRIVATE KEY-----",
-    "-----BEGIN PRIVATE KEY-----",
+static const crimp_pattern_marker MARKERS[] = {
+    {"-----BEGIN RSA PRIVATE KEY-----", "Embedded private key found", CRIMP_SEVERITY_CRITICAL},
+    {"-----BEGIN OPENSSH PRIVATE KEY-----", "Embedded private key found",
+     CRIMP_SEVERITY_CRITICAL},
+    {"-----BEGIN EC PRIVATE KEY-----", "Embedded private key found", CRIMP_SEVERITY_CRITICAL},
+    {"-----BEGIN DSA PRIVATE KEY-----", "Embedded private key found", CRIMP_SEVERITY_CRITICAL},
+    {"-----BEGIN PRIVATE KEY-----", "Embedded private key found", CRIMP_SEVERITY_CRITICAL},
+    {"password=admin", "Default/weak credential pattern 'password=admin' found",
+     CRIMP_SEVERITY_HIGH},
+    {"password=password", "Default/weak credential pattern 'password=password' found",
+     CRIMP_SEVERITY_HIGH},
+    {"password=123456", "Default/weak credential pattern 'password=123456' found",
+     CRIMP_SEVERITY_HIGH},
+    {"root:root:", "Default/weak credential pattern 'root:root:' found", CRIMP_SEVERITY_HIGH},
+    {"admin:admin", "Default/weak credential pattern 'admin:admin' found", CRIMP_SEVERITY_HIGH},
 };
-#define PRIVATE_KEY_MARKER_COUNT (sizeof(PRIVATE_KEY_MARKERS) / sizeof(PRIVATE_KEY_MARKERS[0]))
-
-static const char *DEFAULT_CREDENTIAL_MARKERS[] = {
-    "password=admin", "password=password", "password=123456", "root:root:", "admin:admin",
-};
-#define DEFAULT_CREDENTIAL_MARKER_COUNT \
-    (sizeof(DEFAULT_CREDENTIAL_MARKERS) / sizeof(DEFAULT_CREDENTIAL_MARKERS[0]))
-
-static void scan_file(const char *path, void *userdata) {
-    crimp_finding_list *out = (crimp_finding_list *)userdata;
-
-    char buf[READ_CHUNK];
-    if (crimp_read_file_chunk(path, buf, sizeof(buf)) <= 0) {
-        return;
-    }
-
-    char desc[1024];
-
-    for (size_t i = 0; i < PRIVATE_KEY_MARKER_COUNT; i++) {
-        if (strstr(buf, PRIVATE_KEY_MARKERS[i])) {
-            snprintf(desc, sizeof(desc), "Embedded private key found in %s", path);
-            crimp_finding_list_add(out, "weak-credentials", desc, CRIMP_SEVERITY_CRITICAL);
-        }
-    }
-
-    for (size_t i = 0; i < DEFAULT_CREDENTIAL_MARKER_COUNT; i++) {
-        if (strstr(buf, DEFAULT_CREDENTIAL_MARKERS[i])) {
-            snprintf(desc, sizeof(desc), "Default/weak credential pattern '%s' found in %s",
-                     DEFAULT_CREDENTIAL_MARKERS[i], path);
-            crimp_finding_list_add(out, "weak-credentials", desc, CRIMP_SEVERITY_HIGH);
-        }
-    }
-}
+#define MARKER_COUNT (sizeof(MARKERS) / sizeof(MARKERS[0]))
 
 static void scan(const char *root_path, crimp_finding_list *out) {
-    crimp_walk_directory(root_path, scan_file, out);
+    crimp_scan_directory_for_patterns(root_path, "weak-credentials", MARKERS, MARKER_COUNT, out);
 }
 
 const crimp_detector crimp_detector_weak_credentials = {
