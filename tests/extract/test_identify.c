@@ -85,6 +85,20 @@ int main(void) {
         fprintf(stderr, "FAIL: expected 'unknown' for an unrecognized compressor id\n");
         return 1;
     }
+    static const struct {
+        uint16_t id;
+        const char *name;
+    } compressors[] = {
+        {2, "lzma"}, {3, "lzo"}, {5, "lz4"}, {6, "zstd"},
+    };
+    for (size_t i = 0; i < sizeof(compressors) / sizeof(compressors[0]); i++) {
+        if (strcmp(crimp_fs_compression_name(CRIMP_FS_SQUASHFS, compressors[i].id),
+                   compressors[i].name) != 0) {
+            fprintf(stderr, "FAIL: expected compression name '%s' for id %u\n",
+                    compressors[i].name, compressors[i].id);
+            return 1;
+        }
+    }
     if (strcmp(crimp_fs_compression_name(CRIMP_FS_UNKNOWN, 0), "unknown") != 0) {
         fprintf(stderr, "FAIL: expected 'unknown' compression name for CRIMP_FS_UNKNOWN\n");
         return 1;
