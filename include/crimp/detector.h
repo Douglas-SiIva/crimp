@@ -16,7 +16,7 @@ typedef enum {
 
 typedef struct {
     const char *detector_name;
-    const char *description;
+    char *description; /* owned copy — see crimp_finding_list_add */
     crimp_severity severity;
 } crimp_finding;
 
