@@ -11,10 +11,8 @@ int crimp_fs_identify(const char *path, crimp_fs_info *out) {
 }
 
 const char *crimp_fs_compression_name(crimp_fs_type type, uint16_t compression) {
-    switch (type) {
-        case CRIMP_FS_SQUASHFS:
-            return crimp_squashfs_compression_name(compression);
-        default:
-            return "unknown";
+    if (type == CRIMP_FS_SQUASHFS) {
+        return crimp_squashfs_compression_name(compression);
     }
+    return "unknown";
 }

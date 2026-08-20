@@ -27,7 +27,7 @@ void crimp_finding_list_add(crimp_finding_list *list, const char *detector_name,
 
 void crimp_finding_list_free(crimp_finding_list *list) {
     for (size_t i = 0; i < list->count; i++) {
-        free((void *)list->items[i].description);
+        free(list->items[i].description);
     }
     free(list->items);
     list->items = NULL;

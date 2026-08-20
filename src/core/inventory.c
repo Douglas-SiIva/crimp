@@ -1,5 +1,6 @@
 #include "crimp/inventory.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,7 +24,19 @@ void crimp_component_list_add(crimp_component_list *list, const char *component,
 
     crimp_component *c = &list->items[list->count++];
     c->component = component; /* string literal, not owned */
-    snprintf(c->version, sizeof(c->version), "%s", version);
+
+    /* `version` may originate from scanned firmware content — filter out
+     * non-printable bytes so it can't be used to forge log/report output
+     * (e.g. embedded newlines or control sequences) regardless of whether
+     * the caller already sanitized it. */
+    size_t vi = 0;
+    for (size_t i = 0; version[i] != '\0' && vi < sizeof(c->version) - 1; i++) {
+        if (isprint((unsigned char)version[i])) {
+            c->version[vi++] = version[i];
+        }
+    }
+    c->version[vi] = '\0';
+
     c->path = strdup(path);
 }
 
