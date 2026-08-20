@@ -24,9 +24,33 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install mingw --version=13.2.0 -y
 
+      - name: Install pkg-config (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          curl -sL "https://sourceforge.net/projects/pkgconfiglite/files/latest/download" -o pkgconfiglite.zip
+          unzip -o -q pkgconfiglite.zip
+          echo "$GITHUB_WORKSPACE/pkg-config-lite-0.28-1/bin" >> "$GITHUB_PATH"
+
       - name: Install Ninja and pkg-config (Linux)
         if: runner.os != 'Windows'
         run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config
+
+      - name: Cache vcpkg archives (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      - name: Cache vcpkg archives (Linux)
+        if: runner.os != 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-
 
       - name: Bootstrap vcpkg (Unix)
         if: runner.os != 'Windows'

@@ -30,6 +30,13 @@ jobs:
       - name: Install Ninja and pkg-config
         run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config
 
+      - name: Cache vcpkg archives
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
       - name: Bootstrap vcpkg
         run: ./vcpkg/bootstrap-vcpkg.sh
 
