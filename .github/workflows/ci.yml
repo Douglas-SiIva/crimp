@@ -38,7 +38,7 @@ jobs:
 
       - name: Cache vcpkg archives (Windows)
         if: runner.os == 'Windows'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~\AppData\Local\vcpkg\archives
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
@@ -46,7 +46,7 @@ jobs:
 
       - name: Cache vcpkg archives (Linux)
         if: runner.os != 'Windows'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/vcpkg/archives
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
