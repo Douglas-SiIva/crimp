@@ -62,6 +62,10 @@ add_executable(test_scan tests/core/test_scan.c)
 target_link_libraries(test_scan PRIVATE crimp)
 add_test(NAME scan COMMAND test_scan)
 
+add_executable(test_identify tests/extract/test_identify.c)
+target_link_libraries(test_identify PRIVATE crimp)
+add_test(NAME identify COMMAND test_identify)
+
 add_executable(spike_capstone_test spike/capstone-test/test_disasm.c)
 target_link_libraries(spike_capstone_test PRIVATE capstone::capstone)
 
