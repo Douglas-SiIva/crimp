@@ -6,6 +6,7 @@ build/
 vcpkg_installed/
 .tools/
 spike/*.log
+spike/firmware-extract/samples/
 *.o
 *.obj
 *.exe
