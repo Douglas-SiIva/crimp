@@ -26,6 +26,7 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: c-cpp
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Install Ninja and pkg-config
         run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config
