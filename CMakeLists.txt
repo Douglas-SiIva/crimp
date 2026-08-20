@@ -14,6 +14,9 @@ add_library(crimp STATIC
     src/core/walk.c
     src/core/fileutil.c
     src/core/pattern_scan.c
+    src/core/binstring.c
+    src/core/inventory.c
+    src/core/component_identify.c
     src/extract/identify.c
     src/extract/squashfs.c
     src/detectors/weak_credentials.c
@@ -38,6 +41,10 @@ add_test(NAME exposed_protocols COMMAND test_exposed_protocols)
 add_executable(test_weak_crypto tests/detectors/test_weak_crypto.c)
 target_link_libraries(test_weak_crypto PRIVATE crimp)
 add_test(NAME weak_crypto COMMAND test_weak_crypto)
+
+add_executable(test_component_identify tests/core/test_component_identify.c)
+target_link_libraries(test_component_identify PRIVATE crimp)
+add_test(NAME component_identify COMMAND test_component_identify)
 
 add_executable(spike_capstone_test spike/capstone-test/test_disasm.c)
 target_link_libraries(spike_capstone_test PRIVATE capstone::capstone)
