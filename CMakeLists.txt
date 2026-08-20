@@ -4,6 +4,12 @@ project(crimp LANGUAGES C CXX)
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+option(CRIMP_ENABLE_COVERAGE "Instrument builds with gcov for coverage reporting" OFF)
+if(CRIMP_ENABLE_COVERAGE)
+    add_compile_options(--coverage -O0)
+    add_link_options(--coverage)
+endif()
+
 find_package(capstone CONFIG REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(UNICORN REQUIRED IMPORTED_TARGET unicorn)
