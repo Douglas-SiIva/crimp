@@ -1,0 +1,12 @@
+{
+  "name": "crimp",
+  "version": "0.0.1",
+  "description": "Open source firmware/IoT security scanner",
+  "dependencies": [
+    {
+      "name": "capstone",
+      "features": ["arm", "arm64", "mips", "riscv", "x86"]
+    },
+    "unicorn"
+  ]
+}
