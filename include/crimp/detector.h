@@ -27,6 +27,10 @@ typedef struct {
 } crimp_finding_list;
 
 void crimp_finding_list_init(crimp_finding_list *list);
+
+/* `description` is copied (the list owns its own storage) — safe to pass a
+ * stack buffer or free your own copy right after this call. `detector_name`
+ * is stored as-is; pass a string literal. */
 void crimp_finding_list_add(crimp_finding_list *list, const char *detector_name,
                              const char *description, crimp_severity severity);
 void crimp_finding_list_free(crimp_finding_list *list);
