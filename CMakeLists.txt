@@ -13,3 +13,5 @@ target_link_libraries(spike_capstone_test PRIVATE capstone::capstone)
 
 add_executable(spike_unicorn_test spike/unicorn-test/test_emulate.c)
 target_link_libraries(spike_unicorn_test PRIVATE PkgConfig::UNICORN)
+
+add_executable(spike_squashfs_parse spike/firmware-extract/parse_squashfs_superblock.c)
