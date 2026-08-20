@@ -11,9 +11,12 @@ pkg_check_modules(UNICORN REQUIRED IMPORTED_TARGET unicorn)
 add_library(crimp STATIC
     src/core/finding.c
     src/core/registry.c
+    src/core/walk.c
+    src/core/fileutil.c
     src/extract/identify.c
     src/extract/squashfs.c
     src/detectors/weak_credentials.c
+    src/detectors/exposed_protocols.c
 )
 target_include_directories(crimp PUBLIC include PRIVATE src)
 
@@ -25,6 +28,10 @@ enable_testing()
 add_executable(test_weak_credentials tests/detectors/test_weak_credentials.c)
 target_link_libraries(test_weak_credentials PRIVATE crimp)
 add_test(NAME weak_credentials COMMAND test_weak_credentials)
+
+add_executable(test_exposed_protocols tests/detectors/test_exposed_protocols.c)
+target_link_libraries(test_exposed_protocols PRIVATE crimp)
+add_test(NAME exposed_protocols COMMAND test_exposed_protocols)
 
 add_executable(spike_capstone_test spike/capstone-test/test_disasm.c)
 target_link_libraries(spike_capstone_test PRIVATE capstone::capstone)
