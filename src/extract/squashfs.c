@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 
 #pragma pack(push, 1)
 typedef struct {
@@ -98,9 +99,21 @@ typedef struct {
     uint16_t buf_pos;
 } metadata_cursor;
 
+/* fseek() takes a `long` offset, which is only 32 bits under the LLP64
+ * model MinGW targets on Windows (this project's documented Windows build,
+ * per CLAUDE.md) — casting a 64-bit table offset into that truncates
+ * silently for offsets past ~2GB. Use the platform's real 64-bit seek. */
+static int cursor_fseek64(FILE *f, uint64_t offset) {
+#if defined(_WIN32)
+    return _fseeki64(f, (long long)offset, SEEK_SET);
+#else
+    return fseeko(f, (off_t)offset, SEEK_SET);
+#endif
+}
+
 static int cursor_load_next_block(metadata_cursor *c) {
     uint16_t hdr;
-    if (fseek(c->f, (long)c->next_block_offset, SEEK_SET) != 0) {
+    if (cursor_fseek64(c->f, c->next_block_offset) != 0) {
         return -1;
     }
     if (fread(&hdr, sizeof(hdr), 1, c->f) != 1) {
@@ -311,10 +324,26 @@ void crimp_squashfs_entry_list_free(crimp_squashfs_entry_list *list) {
 
 /* SquashFS caps a single directory listing at 256 entries per header group,
  * but a directory can have many such groups — no fixed cap on total
- * children, so recursion depth is bounded by the real tree, not this walk. */
+ * children, so recursion depth is bounded by the real tree, not this walk.
+ *
+ * `depth` guards against a crafted image whose directory table points a
+ * subdirectory back at itself or an ancestor: without a cap, that would
+ * recurse indefinitely and blow the stack. Each walk_directory frame holds
+ * an 8KiB metadata_cursor (~9.6KB per frame with the rest of its locals),
+ * so the cap has to be picked with that in mind, not just "a big round
+ * number" — 256 levels (~2.5MB) reliably crashed in testing on this
+ * project's default Windows/MinGW build. 32 levels (~300KB worst case) is
+ * still far deeper than any real firmware's directory tree while leaving a
+ * large safety margin against smaller stacks (worker threads, constrained
+ * environments). */
+#define MAX_DIR_DEPTH 32
+
 static int walk_directory(FILE *f, const squashfs_superblock *sb, uint64_t dir_block_index,
                            uint16_t dir_block_offset, uint64_t dir_size, const char *parent_path,
-                           crimp_squashfs_entry_list *out) {
+                           crimp_squashfs_entry_list *out, int depth) {
+    if (depth > MAX_DIR_DEPTH) {
+        return -1;
+    }
     if (dir_size < 4) {
         return 0; /* empty directory: no table entries */
     }
@@ -336,6 +365,11 @@ static int walk_directory(FILE *f, const squashfs_superblock *sb, uint64_t dir_b
         }
         remaining -= 12;
         uint32_t entry_count = count + 1;
+        if (entry_count > 256) {
+            /* Spec caps a header group at 256 entries — anything higher is
+             * a malformed or malicious directory table. */
+            return -1;
+        }
 
         for (uint32_t i = 0; i < entry_count; i++) {
             if (remaining < 8) {
@@ -361,6 +395,7 @@ static int walk_directory(FILE *f, const squashfs_superblock *sb, uint64_t dir_b
             remaining -= name_len;
             (void)inode_number_base;
             (void)inode_offset;
+            (void)type; /* not trusted for is_dir — see below */
 
             char child_path[1024];
             if (parent_path[0] == '\0') {
@@ -374,14 +409,21 @@ static int walk_directory(FILE *f, const squashfs_superblock *sb, uint64_t dir_b
                 return -1;
             }
 
-            int is_dir = (type == 1);
+            /* Directory entries carry their own cached `type` field
+             * (real encoders keep it in sync with the target inode), but
+             * this parser has to assume firmware images can be adversarial
+             * — trusting that cache instead of the inode's real type would
+             * let a crafted image mislabel a directory as a file and hide
+             * its entire contents (weak credentials, exposed protocols,
+             * whatever else) from every downstream detector. */
+            int is_dir = (child.type == 1 || child.type == 8);
             if (entry_list_add(out, child_path, is_dir, is_dir ? 0 : child.file_size) != 0) {
                 return -1;
             }
 
             if (is_dir) {
                 if (walk_directory(f, sb, child.dir_block_index, child.dir_block_offset,
-                                    child.dir_size, child_path, out) != 0) {
+                                    child.dir_size, child_path, out, depth + 1) != 0) {
                     return -1;
                 }
             }
@@ -415,7 +457,7 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
     }
 
     int rc = walk_directory(f, &sb, root.dir_block_index, root.dir_block_offset, root.dir_size,
-                             "", out);
+                             "", out, 0);
     fclose(f);
     if (rc != 0) {
         crimp_squashfs_entry_list_free(out);

@@ -365,6 +365,227 @@ static int build_bad_dir_size_image(const char *path) {
     return 0;
 }
 
+/* A directory whose listing contains an entry pointing back at itself —
+ * without a recursion-depth guard this would recurse forever and blow the
+ * stack. Must fail cleanly (-1), not hang or crash. */
+static int build_self_referential_dir_image(const char *path) {
+    bytebuf inodes, dirs;
+    bb_init(&inodes);
+    bb_init(&dirs);
+
+    /* "loop" inode and its listing reference each other, so their offsets
+     * need reserving before either can be written; lay the listing right
+     * after the inode and patch block_offset in after the fact. */
+    uint32_t loop_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 2);
+    bb_u32(&inodes, 0);  /* block_index */
+    bb_u32(&inodes, 1);  /* link_count */
+    size_t file_size_pos = inodes.len;
+    bb_u16(&inodes, 0);  /* file_size — patched below */
+    bb_u16(&inodes, 0);  /* block_offset — patched below */
+    bb_u32(&inodes, 1);  /* parent_inode */
+
+    uint32_t loop_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0); /* one entry */
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    write_dir_entry(&dirs, (uint16_t)loop_off, 1, "self"); /* points back at "loop" itself */
+    uint32_t loop_listing_len = (uint32_t)(dirs.len - loop_listing_off);
+
+    uint16_t patched_file_size = (uint16_t)(loop_listing_len + 3);
+    uint16_t patched_block_offset = (uint16_t)loop_listing_off;
+    memcpy(inodes.data + file_size_pos, &patched_file_size, 2);
+    memcpy(inodes.data + file_size_pos + 2, &patched_block_offset, 2);
+
+    uint32_t root_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    write_dir_entry(&dirs, (uint16_t)loop_off, 1, "loop");
+    uint32_t root_listing_len = (uint32_t)(dirs.len - root_listing_off);
+
+    uint32_t root_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 1);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, (uint16_t)(root_listing_len + 3));
+    bb_u16(&inodes, (uint16_t)root_listing_off);
+    bb_u32(&inodes, 0);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    sb.root_inode = ((uint64_t)0 << 16) | root_off;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inodes.len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        bb_free(&inodes);
+        bb_free(&dirs);
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t inode_hdr = (uint16_t)(inodes.len | 0x8000);
+    fwrite(&inode_hdr, sizeof(inode_hdr), 1, f);
+    fwrite(inodes.data, 1, inodes.len, f);
+    uint16_t dir_hdr = (uint16_t)(dirs.len | 0x8000);
+    fwrite(&dir_hdr, sizeof(dir_hdr), 1, f);
+    fwrite(dirs.data, 1, dirs.len, f);
+    fclose(f);
+
+    bb_free(&inodes);
+    bb_free(&dirs);
+    return 0;
+}
+
+/* A directory header declaring an entry count above the spec's 256-per-group
+ * cap — must be rejected outright, not processed. */
+static int build_oversized_entry_count_image(const char *path) {
+    bytebuf inodes, dirs;
+    bb_init(&inodes);
+    bb_init(&dirs);
+
+    uint32_t bigdir_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 300); /* count - 1 -> entry_count = 301, over the 256 cap */
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    /* No actual entries follow — the cap check must reject this before
+     * ever trying to read one. */
+
+    uint32_t bigdir_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 2);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, 15); /* dir_size: remaining=12, exactly the header, nothing more */
+    bb_u16(&inodes, (uint16_t)bigdir_listing_off);
+    bb_u32(&inodes, 1);
+
+    uint32_t root_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    write_dir_entry(&dirs, (uint16_t)bigdir_off, 1, "bigdir");
+    uint32_t root_listing_len = (uint32_t)(dirs.len - root_listing_off);
+
+    uint32_t root_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 1);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, (uint16_t)(root_listing_len + 3));
+    bb_u16(&inodes, (uint16_t)root_listing_off);
+    bb_u32(&inodes, 0);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    sb.root_inode = ((uint64_t)0 << 16) | root_off;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inodes.len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        bb_free(&inodes);
+        bb_free(&dirs);
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t inode_hdr = (uint16_t)(inodes.len | 0x8000);
+    fwrite(&inode_hdr, sizeof(inode_hdr), 1, f);
+    fwrite(inodes.data, 1, inodes.len, f);
+    uint16_t dir_hdr = (uint16_t)(dirs.len | 0x8000);
+    fwrite(&dir_hdr, sizeof(dir_hdr), 1, f);
+    fwrite(dirs.data, 1, dirs.len, f);
+    fclose(f);
+
+    bb_free(&inodes);
+    bb_free(&dirs);
+    return 0;
+}
+
+/* A directory entry that lies about its target's type (claims "file" while
+ * the real inode is a directory) — the parser must trust read_inode()'s
+ * real type, not the entry's cached one, or a crafted image could hide an
+ * entire subtree from every detector. */
+static int build_type_confusion_image(const char *path) {
+    bytebuf inodes, dirs;
+    bb_init(&inodes);
+    bb_init(&dirs);
+
+    uint32_t hidden_child_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 2, 3); /* basic file */
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 0xFFFFFFFFu);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 42); /* file_size */
+
+    uint32_t sneaky_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    write_dir_entry(&dirs, (uint16_t)hidden_child_off, 2, "hidden_child");
+    uint32_t sneaky_listing_len = (uint32_t)(dirs.len - sneaky_listing_off);
+
+    uint32_t sneaky_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 2); /* really a directory */
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, (uint16_t)(sneaky_listing_len + 3));
+    bb_u16(&inodes, (uint16_t)sneaky_listing_off);
+    bb_u32(&inodes, 1);
+
+    uint32_t root_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    /* Entry claims type=2 (file) even though `sneaky_off` is a real directory. */
+    write_dir_entry(&dirs, (uint16_t)sneaky_off, 2, "sneaky");
+    uint32_t root_listing_len = (uint32_t)(dirs.len - root_listing_off);
+
+    uint32_t root_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 1);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, (uint16_t)(root_listing_len + 3));
+    bb_u16(&inodes, (uint16_t)root_listing_off);
+    bb_u32(&inodes, 0);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    sb.root_inode = ((uint64_t)0 << 16) | root_off;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inodes.len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        bb_free(&inodes);
+        bb_free(&dirs);
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t inode_hdr = (uint16_t)(inodes.len | 0x8000);
+    fwrite(&inode_hdr, sizeof(inode_hdr), 1, f);
+    fwrite(inodes.data, 1, inodes.len, f);
+    uint16_t dir_hdr = (uint16_t)(dirs.len | 0x8000);
+    fwrite(&dir_hdr, sizeof(dir_hdr), 1, f);
+    fwrite(dirs.data, 1, dirs.len, f);
+    fclose(f);
+
+    bb_free(&inodes);
+    bb_free(&dirs);
+    return 0;
+}
+
 static int expect_list_fails(const char *label, int (*builder)(const char *), const char *path) {
     if (builder(path) != 0) {
         fprintf(stderr, "FAIL: could not build %s fixture\n", label);
@@ -459,7 +680,43 @@ int main(void) {
                                    "test_fixture_squashfs_short_body.img");
     failures += expect_list_fails("a directory with an internally inconsistent dir_size",
                                    build_bad_dir_size_image, "test_fixture_squashfs_baddir.img");
+    failures += expect_list_fails("a self-referential directory (would recurse forever)",
+                                   build_self_referential_dir_image,
+                                   "test_fixture_squashfs_loop.img");
+    failures += expect_list_fails("a directory header over the 256-entry-per-group cap",
+                                   build_oversized_entry_count_image,
+                                   "test_fixture_squashfs_bigcount.img");
     if (failures > 0) {
+        return 1;
+    }
+
+    /* Regression test for the type-confusion fix: a directory entry lying
+     * about its target's type (claims "file") must not stop the parser
+     * from recursing into what read_inode() knows is a real directory. */
+    const char *confusion_path = "test_fixture_squashfs_type_confusion.img";
+    if (build_type_confusion_image(confusion_path) != 0) {
+        fprintf(stderr, "FAIL: could not build type-confusion fixture\n");
+        return 1;
+    }
+    crimp_squashfs_entry_list confusion_list;
+    if (crimp_squashfs_list(confusion_path, &confusion_list) != 0) {
+        fprintf(stderr, "FAIL: crimp_squashfs_list rejected the type-confusion fixture\n");
+        return 1;
+    }
+    int saw_sneaky_dir = 0, saw_hidden_child = 0;
+    for (size_t i = 0; i < confusion_list.count; i++) {
+        crimp_squashfs_entry *e = &confusion_list.items[i];
+        if (strcmp(e->path, "sneaky") == 0 && e->is_dir) saw_sneaky_dir = 1;
+        if (strcmp(e->path, "sneaky/hidden_child") == 0 && !e->is_dir && e->size == 42) {
+            saw_hidden_child = 1;
+        }
+    }
+    crimp_squashfs_entry_list_free(&confusion_list);
+    if (!saw_sneaky_dir || !saw_hidden_child) {
+        fprintf(stderr,
+                "FAIL: a directory entry lying about its type (file) hid a real subdirectory "
+                "and its contents — got sneaky_dir=%d hidden_child=%d\n",
+                saw_sneaky_dir, saw_hidden_child);
         return 1;
     }
 
