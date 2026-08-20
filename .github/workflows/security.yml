@@ -1,0 +1,97 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly scan even if nothing changed, to catch newly disclosed CVEs
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  gitleaks:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  trivy:
+    name: Vulnerability scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: "CRITICAL,HIGH,MEDIUM"
+
+      - name: Upload Trivy results to Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: "trivy-results.sarif"
+
+  sonarcloud:
+    name: SonarCloud
+    runs-on: ubuntu-latest
+    env:
+      BUILD_WRAPPER_OUT_DIR: bw-output
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Check SONAR_TOKEN is configured
+        id: sonar-check
+        run: |
+          if [ -n "${{ secrets.SONAR_TOKEN }}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::SONAR_TOKEN secret not set yet — skipping SonarCloud analysis."
+          fi
+
+      - name: Install Ninja and pkg-config
+        if: steps.sonar-check.outputs.configured == 'true'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config
+
+      - name: Bootstrap vcpkg
+        if: steps.sonar-check.outputs.configured == 'true'
+        run: ./vcpkg/bootstrap-vcpkg.sh
+
+      - name: Install sonar-scanner and build-wrapper
+        if: steps.sonar-check.outputs.configured == 'true'
+        uses: SonarSource/sonarcloud-github-c-cpp@v3
+
+      - name: Configure
+        if: steps.sonar-check.outputs.configured == 'true'
+        run: cmake --preset linux
+
+      - name: Build with wrapper (captures compile commands for Sonar)
+        if: steps.sonar-check.outputs.configured == 'true'
+        run: build-wrapper-linux-x86-64 --out-dir ${{ env.BUILD_WRAPPER_OUT_DIR }} cmake --build build
+
+      - name: SonarCloud Scan
+        if: steps.sonar-check.outputs.configured == 'true'
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.cfamily.build-wrapper-output=${{ env.BUILD_WRAPPER_OUT_DIR }}
