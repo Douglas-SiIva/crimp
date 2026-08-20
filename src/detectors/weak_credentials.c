@@ -1,9 +1,10 @@
 #include "crimp/detectors.h"
 
-#include <dirent.h>
+#include "core/fileutil.h"
+#include "core/walk.h"
+
 #include <stdio.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #define READ_CHUNK 65536
 
@@ -22,19 +23,13 @@ static const char *DEFAULT_CREDENTIAL_MARKERS[] = {
 #define DEFAULT_CREDENTIAL_MARKER_COUNT \
     (sizeof(DEFAULT_CREDENTIAL_MARKERS) / sizeof(DEFAULT_CREDENTIAL_MARKERS[0]))
 
-static void scan_file(const char *path, crimp_finding_list *out) {
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        return;
-    }
+static void scan_file(const char *path, void *userdata) {
+    crimp_finding_list *out = (crimp_finding_list *)userdata;
 
     char buf[READ_CHUNK];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    if (n == 0) {
+    if (crimp_read_file_chunk(path, buf, sizeof(buf)) <= 0) {
         return;
     }
-    buf[n] = '\0';
 
     char desc[1024];
 
@@ -54,38 +49,8 @@ static void scan_file(const char *path, crimp_finding_list *out) {
     }
 }
 
-static void walk_directory(const char *dir_path, crimp_finding_list *out) {
-    DIR *d = opendir(dir_path);
-    if (!d) {
-        return;
-    }
-
-    struct dirent *entry;
-    while ((entry = readdir(d)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-
-        char path[1024];
-        snprintf(path, sizeof(path), "%s/%s", dir_path, entry->d_name);
-
-        struct stat st;
-        if (stat(path, &st) != 0) {
-            continue;
-        }
-
-        if (S_ISDIR(st.st_mode)) {
-            walk_directory(path, out);
-        } else if (S_ISREG(st.st_mode)) {
-            scan_file(path, out);
-        }
-    }
-
-    closedir(d);
-}
-
 static void scan(const char *root_path, crimp_finding_list *out) {
-    walk_directory(root_path, out);
+    crimp_walk_directory(root_path, scan_file, out);
 }
 
 const crimp_detector crimp_detector_weak_credentials = {
