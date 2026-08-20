@@ -2,13 +2,8 @@
 #include <inttypes.h>
 #include <capstone/capstone.h>
 
-/* ARM Thumb-2 bytes: a typical little-endian function prologue, common in IoT firmware */
 static const unsigned char ARM_CODE[] = {
-    0x80, 0xb5,             /* push {r7, lr} */
-    0x82, 0xb0,             /* sub sp, #8 */
-    0x00, 0xaf,             /* add r7, sp, #0 */
-    0x00, 0x20,             /* movs r0, #0 */
-    0x00, 0xbf,             /* nop */
+    0x80, 0xb5, 0x82, 0xb0, 0x00, 0xaf, 0x00, 0x20, 0x00, 0xbf,
 };
 
 int main(void) {

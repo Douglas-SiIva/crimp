@@ -1,15 +1,9 @@
 #include <stdio.h>
 #include <unicorn/unicorn.h>
 
-/* ARM (little-endian, ARM mode) instructions:
- *   mov r0, #5
- *   mov r1, #3
- *   add r0, r0, r1
- */
+/* ARM: mov r0, #5 / mov r1, #3 / add r0, r0, r1 */
 static const unsigned char ARM_CODE[] = {
-    0x05, 0x00, 0xa0, 0xe3, /* mov r0, #5 */
-    0x03, 0x10, 0xa0, 0xe3, /* mov r1, #3 */
-    0x01, 0x00, 0x80, 0xe0, /* add r0, r0, r1 */
+    0x05, 0x00, 0xa0, 0xe3, 0x03, 0x10, 0xa0, 0xe3, 0x01, 0x00, 0x80, 0xe0,
 };
 
 #define ADDRESS 0x10000
