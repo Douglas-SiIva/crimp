@@ -1,7 +1,11 @@
-#ifndef CRIMP_CORE_REGISTRY_H
-#define CRIMP_CORE_REGISTRY_H
+#ifndef CRIMP_REGISTRY_H
+#define CRIMP_REGISTRY_H
 
 #include "crimp/detector.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #define CRIMP_MAX_DETECTORS 64
 
@@ -18,4 +22,8 @@ int crimp_registry_add(crimp_registry *reg, const crimp_detector *det);
 void crimp_registry_run_all(const crimp_registry *reg, const char *root_path,
                              crimp_finding_list *out);
 
-#endif /* CRIMP_CORE_REGISTRY_H */
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* CRIMP_REGISTRY_H */
