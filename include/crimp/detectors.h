@@ -11,6 +11,7 @@ extern "C" {
  * CONTRIBUTING.md for how to add a new one. */
 extern const crimp_detector crimp_detector_weak_credentials;
 extern const crimp_detector crimp_detector_exposed_protocols;
+extern const crimp_detector crimp_detector_weak_crypto;
 
 #ifdef __cplusplus
 }
