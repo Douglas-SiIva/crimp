@@ -586,6 +586,110 @@ static int build_type_confusion_image(const char *path) {
     return 0;
 }
 
+/* root_inode's low-16-bit in-block offset points past the actual content
+ * of its (real, correctly-decoded) metadata block. */
+static int build_out_of_bounds_offset_image(const char *path) {
+    bytebuf inodes;
+    bb_init(&inodes);
+
+    write_inode_header(&inodes, 1, 1); /* a tiny, otherwise-valid root inode */
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, 0);
+    bb_u16(&inodes, 0);
+    bb_u32(&inodes, 0);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    /* Claims an in-block offset (9000) far past the block's real ~24-byte
+     * content — must be rejected, not read out of bounds. */
+    sb.root_inode = ((uint64_t)0 << 16) | 9000;
+    sb.inode_table_start = sizeof(test_superblock);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        bb_free(&inodes);
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t hdr = (uint16_t)(inodes.len | 0x8000);
+    fwrite(&hdr, sizeof(hdr), 1, f);
+    fwrite(inodes.data, 1, inodes.len, f);
+    fclose(f);
+
+    bb_free(&inodes);
+    return 0;
+}
+
+/* A directory entry's name_size claims more bytes than the directory's own
+ * declared remaining length allows — inconsistent, not just physically
+ * truncated (that's build_bad_dir_size_image's job). */
+static int build_name_overrun_image(const char *path) {
+    bytebuf inodes, dirs;
+    bb_init(&inodes);
+    bb_init(&dirs);
+
+    uint32_t root_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0); /* one entry */
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    /* name_size claims 20 bytes but only 3 remain after this fixed part —
+     * write the fixed 8-byte entry header by hand instead of
+     * write_dir_entry() so the on-disk data doesn't actually need 20 bytes
+     * of name (the parser must reject based on the accounting, not on
+     * physically running out of bytes to read). */
+    bb_u16(&dirs, 0);  /* offset */
+    bb_u16(&dirs, 0);  /* inode_offset */
+    bb_u16(&dirs, 1);  /* type */
+    bb_u16(&dirs, 19); /* name_size: name_len = 20 */
+    const char short_name[3] = {'a', 'b', 'c'};
+    bb_append(&dirs, short_name, sizeof(short_name));
+    /* dir_size below declares just enough for header + this 8+3 = 11 bytes,
+     * so remaining after the entry header is 3 — far short of name_len 20. */
+    uint32_t root_listing_len = (uint32_t)(dirs.len - root_listing_off);
+
+    uint32_t root_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 1);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, (uint16_t)(root_listing_len + 3));
+    bb_u16(&inodes, (uint16_t)root_listing_off);
+    bb_u32(&inodes, 0);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    sb.root_inode = ((uint64_t)0 << 16) | root_off;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inodes.len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        bb_free(&inodes);
+        bb_free(&dirs);
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t inode_hdr = (uint16_t)(inodes.len | 0x8000);
+    fwrite(&inode_hdr, sizeof(inode_hdr), 1, f);
+    fwrite(inodes.data, 1, inodes.len, f);
+    uint16_t dir_hdr = (uint16_t)(dirs.len | 0x8000);
+    fwrite(&dir_hdr, sizeof(dir_hdr), 1, f);
+    fwrite(dirs.data, 1, dirs.len, f);
+    fclose(f);
+
+    bb_free(&inodes);
+    bb_free(&dirs);
+    return 0;
+}
+
 static int expect_list_fails(const char *label, int (*builder)(const char *), const char *path) {
     if (builder(path) != 0) {
         fprintf(stderr, "FAIL: could not build %s fixture\n", label);
@@ -686,6 +790,11 @@ int main(void) {
     failures += expect_list_fails("a directory header over the 256-entry-per-group cap",
                                    build_oversized_entry_count_image,
                                    "test_fixture_squashfs_bigcount.img");
+    failures += expect_list_fails("an inode reference offset past its metadata block's content",
+                                   build_out_of_bounds_offset_image,
+                                   "test_fixture_squashfs_oob_offset.img");
+    failures += expect_list_fails("a directory entry name_size exceeding the declared dir_size",
+                                   build_name_overrun_image, "test_fixture_squashfs_name_overrun.img");
     if (failures > 0) {
         return 1;
     }
