@@ -8,6 +8,11 @@ int main(void) {
     crimp_component_list_init(&components);
     crimp_component_list_add(&components, "OpenSSL", "1.1.1", "/rootfs/usr/lib/libssl.so");
     crimp_component_list_add(&components, "BusyBox", "1.31.1", "/rootfs/bin/busybox");
+    /* Exercises write_json_string's escaping: quote, backslash, newline,
+     * carriage return, tab, and a raw control byte all need to survive as
+     * valid JSON, not just plain ASCII component names. */
+    crimp_component_list_add(&components, "Weird\"Name\\With\nControl\r\t\x01" "Chars", "",
+                              "/rootfs/opt/weird");
 
     const char *tmp_path = "test_sbom_output.json";
     FILE *f = fopen(tmp_path, "wb");
@@ -39,6 +44,7 @@ int main(void) {
         "\"1.31.1\"",
         "libssl.so",
         "busybox",
+        "Weird\\\"Name\\\\With\\nControl\\r\\t\\u0001Chars",
     };
     size_t required_count = sizeof(required) / sizeof(required[0]);
 
