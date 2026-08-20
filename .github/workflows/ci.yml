@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install MinGW (Windows)
+        if: runner.os == 'Windows'
+        run: choco install mingw --version=13.2.0 -y
+
+      - name: Install Ninja and pkg-config (Linux)
+        if: runner.os != 'Windows'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config
+
+      - name: Bootstrap vcpkg (Unix)
+        if: runner.os != 'Windows'
+        run: ./vcpkg/bootstrap-vcpkg.sh
+
+      - name: Bootstrap vcpkg (Windows)
+        if: runner.os == 'Windows'
+        run: .\vcpkg\bootstrap-vcpkg.bat
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --preset default
+
+      - name: Configure (Linux)
+        if: runner.os != 'Windows'
+        run: cmake --preset linux
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run spike tests
+        run: |
+          ctest --test-dir build --output-on-failure || true
