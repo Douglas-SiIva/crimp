@@ -73,6 +73,11 @@ target_compile_definitions(test_squashfs_list PRIVATE
     FIXTURE_PATH="${CMAKE_SOURCE_DIR}/tests/fixtures/squashfs_uncompressed.img")
 add_test(NAME squashfs_list COMMAND test_squashfs_list)
 
+add_executable(test_squashfs_synthetic tests/extract/test_squashfs_synthetic.c)
+target_include_directories(test_squashfs_synthetic PRIVATE src/extract)
+target_link_libraries(test_squashfs_synthetic PRIVATE crimp)
+add_test(NAME squashfs_synthetic COMMAND test_squashfs_synthetic)
+
 add_executable(spike_capstone_test spike/capstone-test/test_disasm.c)
 target_link_libraries(spike_capstone_test PRIVATE capstone::capstone)
 
