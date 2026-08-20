@@ -10,6 +10,7 @@ extern "C" {
 /* Built-in detectors. Each corresponds to a roadmap issue — see
  * CONTRIBUTING.md for how to add a new one. */
 extern const crimp_detector crimp_detector_weak_credentials;
+extern const crimp_detector crimp_detector_exposed_protocols;
 
 #ifdef __cplusplus
 }
