@@ -74,24 +74,23 @@ jobs:
         if: steps.sonar-check.outputs.configured == 'true'
         run: ./vcpkg/bootstrap-vcpkg.sh
 
-      - name: Install sonar-scanner and build-wrapper
+      - name: Install Build Wrapper
         if: steps.sonar-check.outputs.configured == 'true'
-        uses: SonarSource/sonarcloud-github-c-cpp@v3
+        uses: SonarSource/sonarqube-scan-action/install-build-wrapper@v7
 
       - name: Configure
         if: steps.sonar-check.outputs.configured == 'true'
         run: cmake --preset linux
 
-      - name: Build with wrapper (captures compile commands for Sonar)
+      - name: Run Build Wrapper (captures compile commands for Sonar)
         if: steps.sonar-check.outputs.configured == 'true'
         run: build-wrapper-linux-x86-64 --out-dir ${{ env.BUILD_WRAPPER_OUT_DIR }} cmake --build build
 
-      - name: SonarCloud Scan
+      - name: SonarQube Cloud Scan
         if: steps.sonar-check.outputs.configured == 'true'
-        uses: SonarSource/sonarcloud-github-action@master
+        uses: SonarSource/sonarqube-scan-action@v7
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           args: >
-            -Dsonar.cfamily.build-wrapper-output=${{ env.BUILD_WRAPPER_OUT_DIR }}
+            --define sonar.cfamily.compile-commands=${{ env.BUILD_WRAPPER_OUT_DIR }}/compile_commands.json
