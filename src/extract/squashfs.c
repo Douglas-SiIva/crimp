@@ -6,6 +6,13 @@
 #include <sys/types.h>
 #include <zlib.h>
 
+#include <errno.h>
+#if defined(_WIN32)
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
+
 #pragma pack(push, 1)
 typedef struct {
     uint32_t magic;
@@ -205,6 +212,10 @@ static int cursor_read(metadata_cursor *c, void *dst, size_t n) {
     return 0;
 }
 
+/* SQUASHFS_INVALID_FRAG: sentinel meaning "no fragment, every block including
+ * the tail is a full block" - not a real fragment table index. */
+#define SQUASHFS_INVALID_FRAG 0xFFFFFFFFu
+
 typedef struct {
     uint16_t type;
     uint32_t inode_number;
@@ -212,10 +223,72 @@ typedef struct {
     uint16_t dir_block_offset;
     uint64_t dir_size; /* raw file_size field, still 3 bytes larger than the real listing */
     uint64_t file_size;
+
+    /* Regular-file content location (types 2/9 only; zeroed otherwise) -
+     * only read when the caller asks for it, since listing alone never
+     * needs it. See read_inode()'s `want_content` parameter. */
+    uint64_t content_blocks_start;
+    uint32_t frag_index;
+    uint32_t frag_block_offset;
+    uint32_t *block_sizes; /* owned; one entry per full data block */
+    uint32_t block_count;
 } squashfs_inode;
 
+/* Frees the block_sizes array a content-reading read_inode() call may have
+ * allocated. Always safe to call, including on a zeroed/never-populated
+ * inode. */
+static void squashfs_inode_free(squashfs_inode *inode) {
+    free(inode->block_sizes);
+    inode->block_sizes = NULL;
+    inode->block_count = 0;
+}
+
+/* Bounds the block_sizes[] array read_inode() allocates for a regular file.
+ * A crafted extended-file inode can claim a near-UINT64_MAX file_size, which
+ * would otherwise turn into an equally absurd block count and malloc size -
+ * this caps it well above anything a real firmware component needs (at the
+ * default 128KiB block size, 1<<20 blocks is a 128GiB file) while keeping
+ * the worst-case allocation bounded (4MiB) regardless of what the image
+ * claims. */
+#define MAX_BLOCKS_PER_FILE (1u << 20)
+
+/* Reads the block_sizes[] array immediately following a regular file
+ * inode's fixed fields (still on the same metadata cursor `c`, which is why
+ * this can't be deferred to a later, separate pass - the array's file
+ * position only exists as "wherever the cursor is right now"). */
+static int read_block_sizes(metadata_cursor *c, uint64_t file_size, uint64_t block_size,
+                             uint32_t frag_index, squashfs_inode *out) {
+    uint64_t nblocks64 = (frag_index == SQUASHFS_INVALID_FRAG)
+                              ? (file_size + block_size - 1) / block_size
+                              : file_size / block_size;
+    if (nblocks64 > MAX_BLOCKS_PER_FILE) {
+        return -1;
+    }
+    uint32_t nblocks = (uint32_t)nblocks64;
+    if (nblocks == 0) {
+        out->block_sizes = NULL;
+        out->block_count = 0;
+        return 0;
+    }
+
+    uint32_t *sizes = (uint32_t *)malloc((size_t)nblocks * sizeof(uint32_t));
+    if (!sizes) {
+        return -1;
+    }
+    for (uint32_t i = 0; i < nblocks; i++) {
+        if (cursor_read(c, &sizes[i], 4) != 0) {
+            free(sizes);
+            return -1;
+        }
+    }
+    out->block_sizes = sizes;
+    out->block_count = nblocks;
+    return 0;
+}
+
 static int read_inode(FILE *f, uint64_t inode_table_start, uint64_t block_offset,
-                       uint16_t in_block_offset, squashfs_inode *out) {
+                       uint16_t in_block_offset, uint64_t block_size, int want_content,
+                       squashfs_inode *out) {
     metadata_cursor c;
     if (cursor_init(&c, f, inode_table_start + block_offset, in_block_offset) != 0) {
         return -1;
@@ -291,6 +364,13 @@ static int read_inode(FILE *f, uint64_t inode_table_start, uint64_t block_offset
                 return -1;
             }
             out->file_size = file_size;
+            out->content_blocks_start = blocks_start;
+            out->frag_index = frag_index;
+            out->frag_block_offset = block_offset_f;
+            if (want_content &&
+                read_block_sizes(&c, file_size, block_size, frag_index, out) != 0) {
+                return -1;
+            }
             break;
         }
         case 9: { /* extended file */
@@ -308,6 +388,13 @@ static int read_inode(FILE *f, uint64_t inode_table_start, uint64_t block_offset
                 return -1;
             }
             out->file_size = file_size;
+            out->content_blocks_start = blocks_start;
+            out->frag_index = frag_index;
+            out->frag_block_offset = block_offset_f;
+            if (want_content &&
+                read_block_sizes(&c, file_size, block_size, frag_index, out) != 0) {
+                return -1;
+            }
             break;
         }
         case 3: { /* basic symlink */
@@ -334,6 +421,231 @@ static int read_inode(FILE *f, uint64_t inode_table_start, uint64_t block_offset
             break;
     }
     return 0;
+}
+
+/* Historical mksquashfs/kernel max block size. Real images use 128KiB by
+ * default; nothing legitimate needs more than this. Rejecting anything
+ * larger bounds every future decompression buffer to a sane size regardless
+ * of what a crafted superblock claims - the actual decompression-bomb
+ * defense for milestone 2b's data blocks (metadata blocks already got this
+ * for free from their fixed 8KiB buffer). */
+#define MAX_SQUASHFS_BLOCK_SIZE (1u << 20)
+
+static int validate_block_size(uint32_t block_size) {
+    if (block_size == 0 || block_size > MAX_SQUASHFS_BLOCK_SIZE) {
+        return -1;
+    }
+    if ((block_size & (block_size - 1)) != 0) { /* spec requires power of two */
+        return -1;
+    }
+    return 0;
+}
+
+/* A directory-table entry name is untrusted. Reject anything that could
+ * turn "output_dir + name" into a path escaping output_dir once joined:
+ * ".", "..", and any embedded path separator (both "/" and "\\", since a
+ * name crafted on one platform must not escape when Crimp runs on the
+ * other) or drive-letter colon. Real mksquashfs never produces such names,
+ * so this can't reject legitimate images - only crafted ones. */
+static int path_component_is_safe(const char *name, size_t len) {
+    if (len == 0) {
+        return 0;
+    }
+    if (len == 1 && name[0] == '.') {
+        return 0;
+    }
+    if (len == 2 && name[0] == '.' && name[1] == '.') {
+        return 0;
+    }
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        if (c == '/' || c == '\\' || c == ':') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int make_directory(const char *path) {
+#if defined(_WIN32)
+    if (_mkdir(path) == 0) {
+        return 0;
+    }
+    return errno == EEXIST ? 0 : -1;
+#else
+    if (mkdir(path, 0755) == 0) {
+        return 0;
+    }
+    return errno == EEXIST ? 0 : -1;
+#endif
+}
+
+/* Joins output_dir and rel_path, rejecting (rather than silently
+ * truncating) anything that doesn't fit - a truncated path could resolve
+ * to somewhere unintended just as easily as a traversal could. */
+static int join_output_path(const char *output_dir, const char *rel_path, char *out,
+                             size_t out_cap) {
+    int n = snprintf(out, out_cap, "%s/%s", output_dir, rel_path);
+    if (n < 0 || (size_t)n >= out_cap) {
+        return -1;
+    }
+    return 0;
+}
+
+/* Fragment table: a raw (uncompressed) array of u64 metadata-block offsets
+ * at fragment_table_start, one per 512 fragment entries; each such block
+ * holds up to 512 16-byte entries (start u64, size u32 with bit 24 marking
+ * "stored uncompressed", unused u32). See
+ * .claude/skills/squashfs-extraction/SKILL.md. */
+#define FRAGMENTS_PER_METADATA_BLOCK 512
+
+static int read_fragment_entry(FILE *f, const squashfs_superblock *sb, uint32_t frag_index,
+                                uint64_t *out_start, uint32_t *out_size, int *out_compressed) {
+    if (frag_index >= sb->fragments) {
+        return -1;
+    }
+    uint32_t block_idx = frag_index / FRAGMENTS_PER_METADATA_BLOCK;
+    uint32_t entry_idx = frag_index % FRAGMENTS_PER_METADATA_BLOCK;
+
+    uint64_t lookup_offset = sb->fragment_table_start + (uint64_t)block_idx * 8;
+    if (cursor_fseek64(f, lookup_offset) != 0) {
+        return -1;
+    }
+    uint64_t meta_block_offset;
+    if (fread(&meta_block_offset, sizeof(meta_block_offset), 1, f) != 1) {
+        return -1;
+    }
+
+    metadata_cursor c;
+    if (cursor_init(&c, f, meta_block_offset, (uint16_t)(entry_idx * 16)) != 0) {
+        return -1;
+    }
+
+    uint64_t start;
+    uint32_t size_field;
+    uint32_t unused;
+    if (cursor_read(&c, &start, 8) || cursor_read(&c, &size_field, 4) ||
+        cursor_read(&c, &unused, 4)) {
+        return -1;
+    }
+    (void)unused;
+
+    *out_start = start;
+    *out_compressed = (size_field & (1u << 24)) == 0;
+    *out_size = size_field & 0xFFFFFFu;
+    return 0;
+}
+
+/* Reads one on-disk block (a full data block or a whole fragment block) at
+ * `offset`, of `size` bytes, decompressing it into `dest` (capacity
+ * `dest_cap`, always sb->block_size - the decompression-bomb cap) unless
+ * `compressed` is false. */
+static int read_and_inflate_block(FILE *f, uint64_t offset, uint32_t size, int compressed,
+                                   uint8_t *dest, uint32_t dest_cap, uint32_t *dest_len) {
+    if (size > dest_cap) {
+        return -1;
+    }
+    if (cursor_fseek64(f, offset) != 0) {
+        return -1;
+    }
+
+    if (!compressed) {
+        if (fread(dest, 1, size, f) != size) {
+            return -1;
+        }
+        *dest_len = size;
+        return 0;
+    }
+
+    uint8_t *compressed_buf = (uint8_t *)malloc(size);
+    if (!compressed_buf) {
+        return -1;
+    }
+    if (fread(compressed_buf, 1, size, f) != size) {
+        free(compressed_buf);
+        return -1;
+    }
+    uLongf out_len = dest_cap;
+    int rc = uncompress(dest, &out_len, compressed_buf, size);
+    free(compressed_buf);
+    if (rc != Z_OK) {
+        return -1;
+    }
+    *dest_len = (uint32_t)out_len;
+    return 0;
+}
+
+/* Extracts one regular file's content to `disk_path`: every full data block
+ * (from content_blocks_start, sized per block_sizes[]) plus, if the file
+ * uses one, its tail slice of a shared fragment block. */
+static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
+                                 const squashfs_inode *inode, const char *disk_path) {
+    FILE *out = fopen(disk_path, "wb");
+    if (!out) {
+        return -1;
+    }
+
+    uint8_t *block_buf = (uint8_t *)malloc(sb->block_size);
+    if (!block_buf) {
+        fclose(out);
+        return -1;
+    }
+
+    int ok = 1;
+    uint64_t block_offset = inode->content_blocks_start;
+    uint64_t bytes_before = 0;
+    for (uint32_t i = 0; ok && i < inode->block_count; i++) {
+        /* Every full block is exactly block_size, except the very last one
+         * when the file has no fragment tail (frag_index invalid) - that
+         * last block absorbs whatever remainder didn't divide evenly. */
+        uint64_t expected_len = sb->block_size;
+        if (bytes_before + expected_len > inode->file_size) {
+            expected_len = inode->file_size - bytes_before;
+        }
+
+        uint32_t raw = inode->block_sizes[i];
+        uint32_t size = raw & 0xFFFFFFu;
+        int compressed = (raw & (1u << 24)) == 0;
+        uint32_t dest_len = 0;
+        if (size == 0) {
+            /* A hole (sparse block): file_size bytes of zero, nothing on disk. */
+            memset(block_buf, 0, (size_t)expected_len);
+            dest_len = (uint32_t)expected_len;
+        } else if (read_and_inflate_block(f, block_offset, size, compressed, block_buf,
+                                           sb->block_size, &dest_len) != 0) {
+            ok = 0;
+            break;
+        }
+        if (dest_len != expected_len || fwrite(block_buf, 1, dest_len, out) != dest_len) {
+            ok = 0;
+            break;
+        }
+        block_offset += size;
+        bytes_before += expected_len;
+    }
+
+    if (ok && inode->frag_index != SQUASHFS_INVALID_FRAG) {
+        uint64_t frag_start;
+        uint32_t frag_size;
+        int frag_compressed;
+        uint64_t tail_len = inode->file_size - bytes_before;
+        uint32_t frag_dest_len = 0;
+        if (read_fragment_entry(f, sb, inode->frag_index, &frag_start, &frag_size,
+                                 &frag_compressed) != 0 ||
+            read_and_inflate_block(f, frag_start, frag_size, frag_compressed, block_buf,
+                                   sb->block_size, &frag_dest_len) != 0) {
+            ok = 0;
+        } else if ((uint64_t)inode->frag_block_offset + tail_len > frag_dest_len) {
+            ok = 0; /* fragment doesn't actually contain the claimed tail range */
+        } else if (fwrite(block_buf + inode->frag_block_offset, 1, (size_t)tail_len, out) !=
+                   (size_t)tail_len) {
+            ok = 0;
+        }
+    }
+
+    free(block_buf);
+    fclose(out);
+    return ok ? 0 : -1;
 }
 
 void crimp_squashfs_entry_list_init(crimp_squashfs_entry_list *list) {
@@ -388,6 +700,7 @@ typedef struct {
     FILE *f;
     const squashfs_superblock *sb;
     crimp_squashfs_entry_list *out;
+    const char *output_dir; /* NULL for crimp_squashfs_list (listing only, no writes) */
 } walk_context;
 
 static int walk_directory(const walk_context *ctx, uint64_t dir_block_index,
@@ -427,6 +740,15 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
     name[name_len] = '\0';
     *remaining -= name_len;
 
+    /* Untrusted: a crafted image's entry name could otherwise turn
+     * "parent_path/name" into a traversal once joined with an output_dir
+     * during extraction. Enforced for listing too, not just extraction -
+     * a real image never has such a name, so this only ever rejects
+     * malformed/adversarial ones. */
+    if (!path_component_is_safe(name, name_len)) {
+        return -1;
+    }
+
     char child_path[1024];
     if (parent_path[0] == '\0') {
         snprintf(child_path, sizeof(child_path), "%s", name);
@@ -435,7 +757,9 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
     }
 
     squashfs_inode child;
-    if (read_inode(ctx->f, ctx->sb->inode_table_start, start, offset, &child) != 0) {
+    int want_content = ctx->output_dir != NULL;
+    if (read_inode(ctx->f, ctx->sb->inode_table_start, start, offset, ctx->sb->block_size,
+                    want_content, &child) != 0) {
         return -1;
     }
 
@@ -448,6 +772,25 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
      * downstream detector. */
     int is_dir = (child.type == 1 || child.type == 8);
     if (entry_list_add(ctx->out, child_path, is_dir, is_dir ? 0 : child.file_size) != 0) {
+        squashfs_inode_free(&child);
+        return -1;
+    }
+
+    int rc = 0;
+    if (ctx->output_dir != NULL) {
+        char disk_path[1280];
+        if (join_output_path(ctx->output_dir, child_path, disk_path, sizeof(disk_path)) != 0) {
+            rc = -1;
+        } else if (is_dir) {
+            rc = make_directory(disk_path);
+        } else if (child.type == 2 || child.type == 9) {
+            rc = extract_regular_file(ctx->f, ctx->sb, &child, disk_path);
+        }
+        /* Other types (symlink, device, fifo, socket) have no content to
+         * write - listed above, nothing extracted, not an error. */
+    }
+    squashfs_inode_free(&child);
+    if (rc != 0) {
         return -1;
     }
 
@@ -537,13 +880,65 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
     uint16_t root_offset = (uint16_t)(sb.root_inode & 0xFFFF);
 
     squashfs_inode root;
-    if (read_inode(f, sb.inode_table_start, root_block, root_offset, &root) != 0) {
+    if (read_inode(f, sb.inode_table_start, root_block, root_offset, sb.block_size, 0, &root) !=
+        0) {
         fclose(f);
         crimp_squashfs_entry_list_free(out);
         return -1;
     }
 
-    walk_context ctx = {f, &sb, out};
+    walk_context ctx = {f, &sb, out, NULL};
+    int rc = walk_directory(&ctx, root.dir_block_index, root.dir_block_offset, root.dir_size, "",
+                             0);
+    fclose(f);
+    if (rc != 0) {
+        crimp_squashfs_entry_list_free(out);
+        return -1;
+    }
+    return 0;
+}
+
+/* Issue #7 milestone 2b: like crimp_squashfs_list, but also writes every
+ * regular file's real (decompressed) content under output_dir, mirroring
+ * the image's directory structure, and creates directories as needed.
+ * output_dir must already exist (created by the caller, or by us as a
+ * plain mkdir here) - every path written beneath it comes from
+ * path_component_is_safe()-checked entry names, so nothing can escape it. */
+int crimp_squashfs_extract(const char *path, const char *output_dir,
+                            crimp_squashfs_entry_list *out) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return -1;
+    }
+
+    squashfs_superblock sb;
+    if (read_superblock(f, &sb) != 0) {
+        fclose(f);
+        return -1;
+    }
+    if (validate_block_size(sb.block_size) != 0) {
+        fclose(f);
+        return -1;
+    }
+    if (make_directory(output_dir) != 0) {
+        fclose(f);
+        return -1;
+    }
+
+    crimp_squashfs_entry_list_init(out);
+
+    uint64_t root_block = sb.root_inode >> 16;
+    uint16_t root_offset = (uint16_t)(sb.root_inode & 0xFFFF);
+
+    squashfs_inode root;
+    if (read_inode(f, sb.inode_table_start, root_block, root_offset, sb.block_size, 0, &root) !=
+        0) {
+        fclose(f);
+        crimp_squashfs_entry_list_free(out);
+        return -1;
+    }
+
+    walk_context ctx = {f, &sb, out, output_dir};
     int rc = walk_directory(&ctx, root.dir_block_index, root.dir_block_offset, root.dir_size, "",
                              0);
     fclose(f);
