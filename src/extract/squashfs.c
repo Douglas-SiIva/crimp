@@ -192,10 +192,8 @@ static int cursor_init(metadata_cursor *c, FILE *f, uint64_t start_block_offset,
 static int cursor_read(metadata_cursor *c, void *dst, size_t n) {
     uint8_t *d = (uint8_t *)dst;
     while (n > 0) {
-        if (c->buf_pos >= c->buf_len) {
-            if (cursor_load_next_block(c) != 0) {
-                return -1;
-            }
+        if (c->buf_pos >= c->buf_len && cursor_load_next_block(c) != 0) {
+            return -1;
         }
         size_t avail = (size_t)(c->buf_len - c->buf_pos);
         size_t take = n < avail ? n : avail;
