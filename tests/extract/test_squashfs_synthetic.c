@@ -231,6 +231,59 @@ static int build_compressed_block_image(const char *path) {
     return 0;
 }
 
+/* A compressed metadata block header promising more bytes than the file
+ * actually has left — the compressed body itself is truncated, distinct
+ * from build_compressed_block_image (whose body is present but garbage). */
+static int build_truncated_compressed_body_image(const char *path) {
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    sb.root_inode = 0;
+    sb.inode_table_start = sizeof(test_superblock);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t compressed_hdr = 16; /* MSB clear = compressed, promises 16 bytes */
+    fwrite(&compressed_hdr, sizeof(compressed_hdr), 1, f);
+    uint8_t only_five[5] = {0}; /* only 5 of the promised 16 */
+    fwrite(only_five, 1, sizeof(only_five), f);
+    fclose(f);
+    return 0;
+}
+
+/* An inode-table metadata block too small to hold even the 16-byte common
+ * inode header, with no continuation block available — exercises both
+ * cursor_read()'s own "need another block but there isn't one" path and
+ * read_inode()'s common-header read failing as a result. */
+static int build_tiny_inode_block_image(const char *path) {
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    sb.root_inode = 0; /* block offset 0, in-block offset 0 */
+    sb.inode_table_start = sizeof(test_superblock);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t inode_hdr = (uint16_t)(5 | 0x8000); /* uncompressed, only 5 bytes */
+    fwrite(&inode_hdr, sizeof(inode_hdr), 1, f);
+    uint8_t five_bytes[5] = {0};
+    fwrite(five_bytes, 1, sizeof(five_bytes), f);
+    fclose(f);
+    return 0;
+}
+
 /* A file that ends right after a valid-looking superblock — reading the
  * root inode has to reach past EOF for its metadata block header. */
 static int build_truncated_after_superblock_image(const char *path) {
@@ -795,6 +848,12 @@ int main(void) {
                                    "test_fixture_squashfs_oob_offset.img");
     failures += expect_list_fails("a directory entry name_size exceeding the declared dir_size",
                                    build_name_overrun_image, "test_fixture_squashfs_name_overrun.img");
+    failures += expect_list_fails("a compressed block body shorter than its header promises",
+                                   build_truncated_compressed_body_image,
+                                   "test_fixture_squashfs_trunc_compressed.img");
+    failures += expect_list_fails("an inode block too small for even the common header",
+                                   build_tiny_inode_block_image,
+                                   "test_fixture_squashfs_tiny_inode_block.img");
     if (failures > 0) {
         return 1;
     }
