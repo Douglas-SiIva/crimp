@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <zlib.h>
 
 #pragma pack(push, 1)
 typedef struct {
@@ -111,6 +112,23 @@ static int cursor_fseek64(FILE *f, uint64_t offset) {
 #endif
 }
 
+/* SquashFS's "gzip" compressor (id 1, by far the most common in real
+ * firmware alongside xz) is a raw zlib stream (RFC 1950 — zlib header +
+ * adler32 trailer), not gzip-wrapped (RFC 1952) and not raw deflate
+ * (RFC 1951) — confirmed against the kernel's squashfs zlib decompressor,
+ * which uses zlib's default inflate init. zlib's single-shot uncompress()
+ * expects exactly that framing, so it's a direct fit — no streaming state
+ * needed since a metadata block's decompressed size is capped at 8KiB. */
+static int inflate_block(uint8_t *dest, uint16_t *dest_len, const uint8_t *src,
+                          uint16_t src_len) {
+    uLongf out_len = METADATA_BLOCK_SIZE;
+    if (uncompress(dest, &out_len, src, src_len) != Z_OK) {
+        return -1;
+    }
+    *dest_len = (uint16_t)out_len;
+    return 0;
+}
+
 static int cursor_load_next_block(metadata_cursor *c) {
     uint16_t hdr;
     if (cursor_fseek64(c->f, c->next_block_offset) != 0) {
@@ -122,18 +140,34 @@ static int cursor_load_next_block(metadata_cursor *c) {
 
     uint16_t size = hdr & 0x7FFF;
     int compressed = (hdr & 0x8000) == 0;
-    if (size > sizeof(c->buf)) {
-        return -1;
-    }
-    if (compressed) {
-        /* Milestone 2: real decompression (gzip first). Not supported yet. */
-        return -1;
-    }
-    if (size > 0 && fread(c->buf, 1, size, c->f) != size) {
+    if (size > sizeof(c->buf) || size == 0) {
         return -1;
     }
 
-    c->buf_len = size;
+    if (compressed) {
+        /* Heap-allocated, not stack: this file already learned the hard
+         * way (walk_directory's recursion depth cap) that stacking 8KiB
+         * buffers is how you get a real stack overflow. */
+        uint8_t *compressed_buf = (uint8_t *)malloc(size);
+        if (!compressed_buf) {
+            return -1;
+        }
+        if (fread(compressed_buf, 1, size, c->f) != size) {
+            free(compressed_buf);
+            return -1;
+        }
+        int rc = inflate_block(c->buf, &c->buf_len, compressed_buf, size);
+        free(compressed_buf);
+        if (rc != 0) {
+            return -1;
+        }
+    } else {
+        if (fread(c->buf, 1, size, c->f) != size) {
+            return -1;
+        }
+        c->buf_len = size;
+    }
+
     c->buf_pos = 0;
     c->next_block_offset += 2 + size;
     return 0;

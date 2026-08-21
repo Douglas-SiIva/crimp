@@ -13,6 +13,7 @@ endif()
 find_package(capstone CONFIG REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(UNICORN REQUIRED IMPORTED_TARGET unicorn)
+find_package(ZLIB REQUIRED)
 
 add_library(crimp STATIC
     src/core/finding.c
@@ -32,6 +33,7 @@ add_library(crimp STATIC
     src/detectors/weak_crypto.c
 )
 target_include_directories(crimp PUBLIC include PRIVATE src)
+target_link_libraries(crimp PRIVATE ZLIB::ZLIB)
 
 add_executable(crimp_cli src/cli/main.c)
 target_link_libraries(crimp_cli PRIVATE crimp)
@@ -72,6 +74,13 @@ target_link_libraries(test_squashfs_list PRIVATE crimp)
 target_compile_definitions(test_squashfs_list PRIVATE
     FIXTURE_PATH="${CMAKE_SOURCE_DIR}/tests/fixtures/squashfs_uncompressed.img")
 add_test(NAME squashfs_list COMMAND test_squashfs_list)
+
+add_executable(test_squashfs_gzip tests/extract/test_squashfs_gzip.c)
+target_include_directories(test_squashfs_gzip PRIVATE src/extract)
+target_link_libraries(test_squashfs_gzip PRIVATE crimp)
+target_compile_definitions(test_squashfs_gzip PRIVATE
+    FIXTURE_PATH="${CMAKE_SOURCE_DIR}/tests/fixtures/squashfs_gzip.img")
+add_test(NAME squashfs_gzip COMMAND test_squashfs_gzip)
 
 add_executable(test_squashfs_synthetic tests/extract/test_squashfs_synthetic.c)
 target_include_directories(test_squashfs_synthetic PRIVATE src/extract)
