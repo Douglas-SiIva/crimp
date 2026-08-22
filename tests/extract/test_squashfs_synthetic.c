@@ -82,14 +82,20 @@ static void write_inode_header(bytebuf *b, uint16_t type, uint32_t inode_number)
     bb_u32(b, inode_number);
 }
 
-static void write_dir_entry(bytebuf *dir, uint16_t offset, uint16_t basic_type,
-                             const char *name) {
-    uint16_t name_len = (uint16_t)strlen(name);
+/* Raw variant for names that aren't valid C strings (e.g. an embedded NUL
+ * byte) - write_dir_entry() below covers the common case via strlen(). */
+static void write_dir_entry_raw(bytebuf *dir, uint16_t offset, uint16_t basic_type,
+                                 const char *name, uint16_t name_len) {
     bb_u16(dir, offset);
     bb_u16(dir, 0); /* inode_offset delta — unused by the parser (random-access lookup) */
     bb_u16(dir, basic_type);
     bb_u16(dir, (uint16_t)(name_len - 1)); /* off-by-one encoded */
     bb_append(dir, name, name_len);
+}
+
+static void write_dir_entry(bytebuf *dir, uint16_t offset, uint16_t basic_type,
+                             const char *name) {
+    write_dir_entry_raw(dir, offset, basic_type, name, (uint16_t)strlen(name));
 }
 
 /* Builds a single-metadata-block-per-table image with:
@@ -743,6 +749,379 @@ static int build_name_overrun_image(const char *path) {
     return 0;
 }
 
+/* A root directory entry whose name is a valid C string up to a
+ * mid-sequence NUL byte, followed by more (different) raw bytes -
+ * path_component_is_safe() must look at all name_len bytes, not stop where
+ * a C string function would, or two differently-named entries could
+ * collide onto the same disk path once %s truncates them. */
+static int build_embedded_nul_name_image(const char *path) {
+    bytebuf inodes, dirs;
+    bb_init(&inodes);
+    bb_init(&dirs);
+
+    uint32_t file_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 2, 2); /* basic file */
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 0xFFFFFFFFu);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 5); /* file_size */
+
+    uint32_t root_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    const char nul_name[5] = {'a', 'b', '\0', 'c', 'd'};
+    write_dir_entry_raw(&dirs, (uint16_t)file_off, 2, nul_name, sizeof(nul_name));
+    uint32_t root_listing_len = (uint32_t)(dirs.len - root_listing_off);
+
+    uint32_t root_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 1);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, (uint16_t)(root_listing_len + 3));
+    bb_u16(&inodes, (uint16_t)root_listing_off);
+    bb_u32(&inodes, 0);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    sb.root_inode = ((uint64_t)0 << 16) | root_off;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inodes.len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        bb_free(&inodes);
+        bb_free(&dirs);
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t inode_hdr = (uint16_t)(inodes.len | 0x8000);
+    fwrite(&inode_hdr, sizeof(inode_hdr), 1, f);
+    fwrite(inodes.data, 1, inodes.len, f);
+    uint16_t dir_hdr = (uint16_t)(dirs.len | 0x8000);
+    fwrite(&dir_hdr, sizeof(dir_hdr), 1, f);
+    fwrite(dirs.data, 1, dirs.len, f);
+    fclose(f);
+
+    bb_free(&inodes);
+    bb_free(&dirs);
+    return 0;
+}
+
+/* A root directory entry literally named "con" - an ordinary filename on
+ * Linux (where such an image would normally be built), but Windows'
+ * console device on this project's other documented build target. */
+static int build_windows_reserved_name_image(const char *path) {
+    bytebuf inodes, dirs;
+    bb_init(&inodes);
+    bb_init(&dirs);
+
+    uint32_t file_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 2, 2); /* basic file */
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 0xFFFFFFFFu);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 5); /* file_size */
+
+    uint32_t root_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    write_dir_entry(&dirs, (uint16_t)file_off, 2, "con");
+    uint32_t root_listing_len = (uint32_t)(dirs.len - root_listing_off);
+
+    uint32_t root_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 1);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, (uint16_t)(root_listing_len + 3));
+    bb_u16(&inodes, (uint16_t)root_listing_off);
+    bb_u32(&inodes, 0);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    sb.root_inode = ((uint64_t)0 << 16) | root_off;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inodes.len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        bb_free(&inodes);
+        bb_free(&dirs);
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t inode_hdr = (uint16_t)(inodes.len | 0x8000);
+    fwrite(&inode_hdr, sizeof(inode_hdr), 1, f);
+    fwrite(inodes.data, 1, inodes.len, f);
+    uint16_t dir_hdr = (uint16_t)(dirs.len | 0x8000);
+    fwrite(&dir_hdr, sizeof(dir_hdr), 1, f);
+    fwrite(dirs.data, 1, dirs.len, f);
+    fclose(f);
+
+    bb_free(&inodes);
+    bb_free(&dirs);
+    return 0;
+}
+
+/* A root entry literally named "." or "..". Shares the same shape as
+ * build_windows_reserved_name_image (single file entry under root) -
+ * `variant` picks which literal name to use. */
+static int build_dot_or_dotdot_name_image(const char *path, const char *name) {
+    bytebuf inodes, dirs;
+    bb_init(&inodes);
+    bb_init(&dirs);
+
+    uint32_t file_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 2, 2); /* basic file */
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 0xFFFFFFFFu);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 5); /* file_size */
+
+    uint32_t root_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    write_dir_entry(&dirs, (uint16_t)file_off, 2, name);
+    uint32_t root_listing_len = (uint32_t)(dirs.len - root_listing_off);
+
+    uint32_t root_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 1);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, (uint16_t)(root_listing_len + 3));
+    bb_u16(&inodes, (uint16_t)root_listing_off);
+    bb_u32(&inodes, 0);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    sb.root_inode = ((uint64_t)0 << 16) | root_off;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inodes.len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        bb_free(&inodes);
+        bb_free(&dirs);
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t inode_hdr = (uint16_t)(inodes.len | 0x8000);
+    fwrite(&inode_hdr, sizeof(inode_hdr), 1, f);
+    fwrite(inodes.data, 1, inodes.len, f);
+    uint16_t dir_hdr = (uint16_t)(dirs.len | 0x8000);
+    fwrite(&dir_hdr, sizeof(dir_hdr), 1, f);
+    fwrite(dirs.data, 1, dirs.len, f);
+    fclose(f);
+
+    bb_free(&inodes);
+    bb_free(&dirs);
+    return 0;
+}
+
+/* "CON" (uppercase) - exercises is_windows_reserved_name()'s case-folding,
+ * not just the all-lowercase "con" already covered above. Reuses the same
+ * single-file-under-root shape via build_windows_reserved_name_image's
+ * twin, parameterized on the name. */
+static int build_uppercase_reserved_name_image(const char *path) {
+    return build_dot_or_dotdot_name_image(path, "CON");
+}
+
+/* ".hidden" - a real, ordinary dotfile pattern (like ".bashrc"). Must be
+ * *accepted*: it's neither "." nor ".." (wrong length/content) nor a
+ * Windows-reserved name (is_windows_reserved_name splits at the first '.'
+ * and finds an empty base before it, so it isn't even in the reserved-name
+ * shape to compare against). Regression test against over-rejecting
+ * legitimate names once the NUL/reserved-name checks were added. */
+static int build_dotfile_name_image(const char *path) {
+    return build_dot_or_dotdot_name_image(path, ".hidden");
+}
+
+static int build_dot_name_image(const char *path) { return build_dot_or_dotdot_name_image(path, "."); }
+static int build_dotdot_name_image(const char *path) {
+    return build_dot_or_dotdot_name_image(path, "..");
+}
+
+/* Chain of 5 real nested directories with 200-byte names, each holding the
+ * next level's single entry, plus one more 200-byte-named entry at the
+ * bottom that doesn't need a resolvable inode - by the time the walk
+ * reaches it, accumulated parent_path (5 * 201 = 1005 bytes) plus that
+ * entry's own "/" + 200-byte name pushes child_path's snprintf past its
+ * 1024-byte buffer. Regression test for the child_path truncation fix:
+ * without it, this would silently truncate instead of being rejected. */
+#define DEEP_NAME_LEN 200
+static int build_deep_long_names_image(const char *path) {
+    bytebuf inodes, dirs;
+    bb_init(&inodes);
+    bb_init(&dirs);
+
+    char name[DEEP_NAME_LEN + 1];
+    memset(name, 'a', DEEP_NAME_LEN);
+    name[DEEP_NAME_LEN] = '\0';
+
+    /* Level 5 (deepest real directory)'s listing holds the one leaf entry
+     * that never needs a valid inode - the truncation check must reject
+     * before read_inode() is ever reached for it. */
+    uint32_t listing5_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    write_dir_entry(&dirs, 0, 1, name); /* offset 0: never resolved */
+    uint32_t listing5_len = (uint32_t)(dirs.len - listing5_off);
+
+    uint32_t dir_off[6]; /* dir_off[1..5] used */
+    uint32_t prev_listing_off = listing5_off;
+    uint32_t prev_listing_len = listing5_len;
+    for (int level = 5; level >= 1; level--) {
+        uint32_t off = (uint32_t)inodes.len;
+        write_inode_header(&inodes, 1, (uint32_t)(100 + level));
+        bb_u32(&inodes, 0); /* block_index (single dir block) */
+        bb_u32(&inodes, 1); /* link_count */
+        bb_u16(&inodes, (uint16_t)(prev_listing_len + 3));
+        bb_u16(&inodes, (uint16_t)prev_listing_off);
+        bb_u32(&inodes, 1); /* parent_inode */
+        dir_off[level] = off;
+
+        if (level > 1) {
+            uint32_t listing_off = (uint32_t)dirs.len;
+            bb_u32(&dirs, 0);
+            bb_u32(&dirs, 0);
+            bb_u32(&dirs, 0);
+            write_dir_entry(&dirs, (uint16_t)off, 1, name);
+            prev_listing_off = listing_off;
+            prev_listing_len = (uint32_t)(dirs.len - listing_off);
+        }
+    }
+
+    /* Root's listing holds level-1's entry. */
+    uint32_t root_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    write_dir_entry(&dirs, (uint16_t)dir_off[1], 1, name);
+    uint32_t root_listing_len = (uint32_t)(dirs.len - root_listing_off);
+
+    uint32_t root_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 1);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, (uint16_t)(root_listing_len + 3));
+    bb_u16(&inodes, (uint16_t)root_listing_off);
+    bb_u32(&inodes, 0);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    sb.root_inode = ((uint64_t)0 << 16) | root_off;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inodes.len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        bb_free(&inodes);
+        bb_free(&dirs);
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t inode_hdr = (uint16_t)(inodes.len | 0x8000);
+    fwrite(&inode_hdr, sizeof(inode_hdr), 1, f);
+    fwrite(inodes.data, 1, inodes.len, f);
+    uint16_t dir_hdr = (uint16_t)(dirs.len | 0x8000);
+    fwrite(&dir_hdr, sizeof(dir_hdr), 1, f);
+    fwrite(dirs.data, 1, dirs.len, f);
+    fclose(f);
+
+    bb_free(&inodes);
+    bb_free(&dirs);
+    return 0;
+}
+
+/* A directory entry with name_size = 0xFFFF - name_len = name_size + 1
+ * must become 65536, not wrap to 0 in 16-bit arithmetic. Regression test
+ * for that exact overflow: written raw (not via write_dir_entry[_raw](),
+ * both of which take an actual name buffer) since the on-disk entry here
+ * has *no* name bytes at all - name_len wrapping to 0 is precisely what
+ * would make the parser believe none were needed. */
+static int build_name_size_wraparound_image(const char *path) {
+    bytebuf inodes, dirs;
+    bb_init(&inodes);
+    bb_init(&dirs);
+
+    uint32_t file_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 2, 2); /* basic file */
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 0xFFFFFFFFu);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 5); /* file_size */
+
+    uint32_t root_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0); /* one entry */
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    bb_u16(&dirs, (uint16_t)file_off); /* offset */
+    bb_u16(&dirs, 0);                  /* inode_offset */
+    bb_u16(&dirs, 2);                  /* type */
+    bb_u16(&dirs, 0xFFFF);             /* name_size: wraps name_len to 0 if truncated */
+    /* No name bytes follow - if the parser reads name_len=0, that's
+     * consistent with the corrupted (wrapped) computation and it'll accept
+     * an empty name; if it reads the correct name_len=65536, `remaining`
+     * (far short of that) rejects it before any read is attempted. */
+    uint32_t root_listing_len = (uint32_t)(dirs.len - root_listing_off);
+
+    uint32_t root_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 1);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, (uint16_t)(root_listing_len + 3));
+    bb_u16(&inodes, (uint16_t)root_listing_off);
+    bb_u32(&inodes, 0);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    sb.root_inode = ((uint64_t)0 << 16) | root_off;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inodes.len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        bb_free(&inodes);
+        bb_free(&dirs);
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t inode_hdr = (uint16_t)(inodes.len | 0x8000);
+    fwrite(&inode_hdr, sizeof(inode_hdr), 1, f);
+    fwrite(inodes.data, 1, inodes.len, f);
+    uint16_t dir_hdr = (uint16_t)(dirs.len | 0x8000);
+    fwrite(&dir_hdr, sizeof(dir_hdr), 1, f);
+    fwrite(dirs.data, 1, dirs.len, f);
+    fclose(f);
+
+    bb_free(&inodes);
+    bb_free(&dirs);
+    return 0;
+}
+
 static int expect_list_fails(const char *label, int (*builder)(const char *), const char *path) {
     if (builder(path) != 0) {
         fprintf(stderr, "FAIL: could not build %s fixture\n", label);
@@ -754,6 +1133,21 @@ static int expect_list_fails(const char *label, int (*builder)(const char *), co
         crimp_squashfs_entry_list_free(&list);
         return 1;
     }
+    return 0;
+}
+
+static int expect_list_succeeds(const char *label, int (*builder)(const char *),
+                                 const char *path) {
+    if (builder(path) != 0) {
+        fprintf(stderr, "FAIL: could not build %s fixture\n", label);
+        return 1;
+    }
+    crimp_squashfs_entry_list list;
+    if (crimp_squashfs_list(path, &list) != 0) {
+        fprintf(stderr, "FAIL: expected crimp_squashfs_list to accept %s\n", label);
+        return 1;
+    }
+    crimp_squashfs_entry_list_free(&list);
     return 0;
 }
 
@@ -854,6 +1248,28 @@ int main(void) {
     failures += expect_list_fails("an inode block too small for even the common header",
                                    build_tiny_inode_block_image,
                                    "test_fixture_squashfs_tiny_inode_block.img");
+    failures += expect_list_fails("an entry name with an embedded NUL byte",
+                                   build_embedded_nul_name_image,
+                                   "test_fixture_squashfs_nul_name.img");
+    failures += expect_list_fails("an entry named after a Windows-reserved device (\"con\")",
+                                   build_windows_reserved_name_image,
+                                   "test_fixture_squashfs_reserved_name.img");
+    failures += expect_list_fails("an entry literally named \".\"", build_dot_name_image,
+                                   "test_fixture_squashfs_dot_name.img");
+    failures += expect_list_fails("an entry literally named \"..\"", build_dotdot_name_image,
+                                   "test_fixture_squashfs_dotdot_name.img");
+    failures += expect_list_fails(
+        "a deep chain of long names that would overflow child_path's buffer",
+        build_deep_long_names_image, "test_fixture_squashfs_deep_long_names.img");
+    failures += expect_list_fails("an entry named \"CON\" (uppercase Windows-reserved)",
+                                   build_uppercase_reserved_name_image,
+                                   "test_fixture_squashfs_reserved_name_upper.img");
+    failures += expect_list_succeeds("an ordinary dotfile entry (\".hidden\")",
+                                      build_dotfile_name_image,
+                                      "test_fixture_squashfs_dotfile_name.img");
+    failures += expect_list_fails(
+        "a directory entry whose name_size (0xFFFF) wraps name_len to 0",
+        build_name_size_wraparound_image, "test_fixture_squashfs_name_size_wrap.img");
     if (failures > 0) {
         return 1;
     }
