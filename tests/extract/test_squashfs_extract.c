@@ -280,6 +280,93 @@ static int build_tiny_block_size_image(const char *path) {
     return 0;
 }
 
+/* Single-file image whose one data block is stored *uncompressed* (block
+ * size field's bit 24 set) - the "not compressed" branch of
+ * read_and_inflate_block(), never exercised by any other fixture here
+ * (every other one uses gzip). Mirrors build_corrupt_block_image's layout,
+ * but with valid raw bytes and the uncompressed flag set, so extraction
+ * succeeds and the content can be verified byte-for-byte. */
+static int build_uncompressed_block_image(const char *path) {
+    const uint32_t block_size = 4096;
+    const uint16_t file_inode_len = 16 + 16 + 4;
+    const uint16_t root_inode_len = 16 + 16;
+    const uint16_t inode_blob_len = (uint16_t)(file_inode_len + root_inode_len);
+    const char name[] = "raw.bin";
+    const uint16_t name_len = (uint16_t)(sizeof(name) - 1);
+    const uint16_t dir_entry_len = (uint16_t)(8 + name_len);
+    const uint16_t dir_blob_len = (uint16_t)(12 + dir_entry_len);
+
+    uint8_t raw_data[4096];
+    for (size_t i = 0; i < sizeof(raw_data); i++) {
+        raw_data[i] = (uint8_t)(i % 251);
+    }
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.inodes = 2;
+    sb.block_size = block_size;
+    sb.block_log = 12;
+    sb.s_major = 4;
+    sb.root_inode = file_inode_len;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inode_blob_len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+
+    fw16(f, (uint16_t)(inode_blob_len | 0x8000));
+    fw16(f, 2);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw32(f, 0);
+    fw32(f, 2);
+    fw32(f, 0); /* blocks_start - patched below */
+    fw32(f, 0xFFFFFFFFu);
+    fw32(f, 0);
+    fw32(f, block_size);
+    fw32(f, block_size | (1u << 24)); /* size = block_size, bit 24 set: uncompressed */
+
+    fw16(f, 1);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw32(f, 0);
+    fw32(f, 1);
+    fw32(f, 0);
+    fw32(f, 1);
+    fw16(f, (uint16_t)(dir_blob_len + 3));
+    fw16(f, 0);
+    fw32(f, 0);
+
+    fw16(f, (uint16_t)(dir_blob_len | 0x8000));
+    fw32(f, 0);
+    fw32(f, 0);
+    fw32(f, 0);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw16(f, 2);
+    fw16(f, (uint16_t)(name_len - 1));
+    fwrite(name, 1, name_len, f);
+
+    long content_blocks_start = ftell(f);
+    fwrite(raw_data, 1, sizeof(raw_data), f);
+    fclose(f);
+
+    f = fopen(path, "r+b");
+    if (!f) {
+        return -1;
+    }
+    fseek(f, (long)(sizeof(test_superblock) + 2 + 16), SEEK_SET);
+    fw32(f, (uint32_t)content_blocks_start);
+    fclose(f);
+    return 0;
+}
+
 static int make_test_directory(const char *path) {
 #if defined(_WIN32)
     return _mkdir(path);
@@ -401,6 +488,68 @@ int main(void) {
         crimp_squashfs_entry_list_free(&tiny_block_list);
         return 1;
     }
+
+    /* A missing image file must be rejected at the initial fopen(). */
+    crimp_squashfs_entry_list missing_list;
+    if (crimp_squashfs_extract("test_fixture_squashfs_does_not_exist.img", "squashfs_extract_missing_output",
+                                &missing_list) == 0) {
+        fprintf(stderr, "FAIL: expected crimp_squashfs_extract to reject a missing image file\n");
+        crimp_squashfs_entry_list_free(&missing_list);
+        return 1;
+    }
+
+    /* output_dir itself colliding with a pre-existing regular file (as
+     * opposed to a stale file deeper in the tree, already covered above)
+     * must fail at make_directory(), not proceed as if it were created. */
+    const char *output_collision_path = "squashfs_extract_output_is_a_file";
+    FILE *stale_output = fopen(output_collision_path, "wb");
+    if (!stale_output) {
+        fprintf(stderr, "FAIL: could not create stale-output-dir fixture at '%s'\n",
+                output_collision_path);
+        return 1;
+    }
+    fputs("not a directory either", stale_output);
+    fclose(stale_output);
+    crimp_squashfs_entry_list output_collision_list;
+    if (crimp_squashfs_extract(FIXTURE_PATH, output_collision_path, &output_collision_list) == 0) {
+        fprintf(stderr,
+                "FAIL: expected crimp_squashfs_extract to reject output_dir '%s' already "
+                "existing as a regular file\n",
+                output_collision_path);
+        crimp_squashfs_entry_list_free(&output_collision_list);
+        return 1;
+    }
+
+    /* A data block stored uncompressed (the other half of
+     * read_and_inflate_block()'s branch - every other fixture here uses
+     * gzip) must extract correctly. */
+    const char *uncompressed_path = "test_fixture_squashfs_uncompressed_block.img";
+    if (build_uncompressed_block_image(uncompressed_path) != 0) {
+        fprintf(stderr, "FAIL: could not build uncompressed-block fixture\n");
+        return 1;
+    }
+    const char *uncompressed_out_dir = "squashfs_extract_uncompressed_output";
+    crimp_squashfs_entry_list uncompressed_list;
+    if (crimp_squashfs_extract(uncompressed_path, uncompressed_out_dir, &uncompressed_list) != 0) {
+        fprintf(stderr, "FAIL: crimp_squashfs_extract failed on an uncompressed-block image\n");
+        return 1;
+    }
+    crimp_squashfs_entry_list_free(&uncompressed_list);
+    unsigned char expected_raw[4096];
+    for (size_t i = 0; i < sizeof(expected_raw); i++) {
+        expected_raw[i] = (unsigned char)(i % 251);
+    }
+    char raw_path[1024];
+    snprintf(raw_path, sizeof(raw_path), "%s/raw.bin", uncompressed_out_dir);
+    size_t raw_len = 0;
+    unsigned char *raw_buf = read_whole_file(raw_path, &raw_len);
+    if (!raw_buf || raw_len != sizeof(expected_raw) ||
+        memcmp(raw_buf, expected_raw, sizeof(expected_raw)) != 0) {
+        fprintf(stderr, "FAIL: uncompressed block content mismatch in '%s'\n", raw_path);
+        free(raw_buf);
+        return 1;
+    }
+    free(raw_buf);
 
     printf("PASS: crimp_squashfs_extract content matches unsquashfs -d ground truth\n");
     return 0;
