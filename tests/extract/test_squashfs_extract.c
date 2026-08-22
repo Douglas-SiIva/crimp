@@ -97,6 +97,80 @@ typedef struct {
 
 static void fw16(FILE *f, uint16_t v) { fwrite(&v, sizeof(v), 1, f); }
 static void fw32(FILE *f, uint32_t v) { fwrite(&v, sizeof(v), 1, f); }
+static void fw64(FILE *f, uint64_t v) { fwrite(&v, sizeof(v), 1, f); }
+
+/* An extended-file inode claiming file_size = UINT64_MAX with no fragment
+ * - the no-fragment block-count formula ((file_size + block_size - 1) /
+ * block_size) must reject this rather than silently overflow to a small
+ * block count. No data blocks are ever written (extraction must fail
+ * before reaching them), so the image is just the inode + directory
+ * tables. */
+static int build_huge_file_size_image(const char *path) {
+    const uint16_t file_inode_len = 16 + 8 + 8 + 8 + 4 + 4 + 4 + 4; /* header + extended-file fields */
+    const uint16_t root_inode_len = 16 + 16;
+    const uint16_t inode_blob_len = (uint16_t)(file_inode_len + root_inode_len);
+    const char name[] = "huge.bin";
+    const uint16_t name_len = (uint16_t)(sizeof(name) - 1);
+    const uint16_t dir_entry_len = (uint16_t)(8 + name_len);
+    const uint16_t dir_blob_len = (uint16_t)(12 + dir_entry_len);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.inodes = 2;
+    sb.block_size = 4096;
+    sb.block_log = 12;
+    sb.s_major = 4;
+    sb.root_inode = file_inode_len;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inode_blob_len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+
+    fw16(f, (uint16_t)(inode_blob_len | 0x8000));
+    /* extended file inode (offset 0) */
+    fw16(f, 9);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw32(f, 0);
+    fw32(f, 2); /* inode_number */
+    fw64(f, 0); /* blocks_start */
+    fw64(f, 0xFFFFFFFFFFFFFFFFull); /* file_size: UINT64_MAX */
+    fw64(f, 0); /* sparse */
+    fw32(f, 1); /* link_count */
+    fw32(f, 0xFFFFFFFFu); /* frag_index: none */
+    fw32(f, 0); /* block_offset */
+    fw32(f, 0xFFFFFFFFu); /* xattr_index: none */
+    /* root inode (offset file_inode_len) */
+    fw16(f, 1);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw32(f, 0);
+    fw32(f, 1); /* inode_number */
+    fw32(f, 0); /* block_index */
+    fw32(f, 1); /* link_count */
+    fw16(f, (uint16_t)(dir_blob_len + 3));
+    fw16(f, 0); /* block_offset */
+    fw32(f, 0); /* parent_inode */
+
+    fw16(f, (uint16_t)(dir_blob_len | 0x8000));
+    fw32(f, 0);
+    fw32(f, 0);
+    fw32(f, 0);
+    fw16(f, 0); /* offset: file inode's in-block offset */
+    fw16(f, 0);
+    fw16(f, 2); /* type */
+    fw16(f, (uint16_t)(name_len - 1));
+    fwrite(name, 1, name_len, f);
+    fclose(f);
+    return 0;
+}
 
 /* A single-file image whose one data block is marked compressed but holds
  * bytes that aren't a valid zlib stream - decompression fails partway
@@ -550,6 +624,23 @@ int main(void) {
         return 1;
     }
     free(raw_buf);
+
+    /* file_size = UINT64_MAX with no fragment must be rejected, not
+     * silently accepted as a tiny (overflowed) block count. */
+    const char *huge_size_path = "test_fixture_squashfs_huge_file_size.img";
+    if (build_huge_file_size_image(huge_size_path) != 0) {
+        fprintf(stderr, "FAIL: could not build huge-file-size fixture\n");
+        return 1;
+    }
+    const char *huge_size_out_dir = "squashfs_extract_huge_size_output";
+    crimp_squashfs_entry_list huge_size_list;
+    if (crimp_squashfs_extract(huge_size_path, huge_size_out_dir, &huge_size_list) == 0) {
+        fprintf(stderr,
+                "FAIL: expected crimp_squashfs_extract to reject file_size=UINT64_MAX with no "
+                "fragment (block-count overflow)\n");
+        crimp_squashfs_entry_list_free(&huge_size_list);
+        return 1;
+    }
 
     printf("PASS: crimp_squashfs_extract content matches unsquashfs -d ground truth\n");
     return 0;

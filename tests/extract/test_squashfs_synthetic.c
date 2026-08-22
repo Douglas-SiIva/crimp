@@ -1052,6 +1052,76 @@ static int build_deep_long_names_image(const char *path) {
     return 0;
 }
 
+/* A directory entry with name_size = 0xFFFF - name_len = name_size + 1
+ * must become 65536, not wrap to 0 in 16-bit arithmetic. Regression test
+ * for that exact overflow: written raw (not via write_dir_entry[_raw](),
+ * both of which take an actual name buffer) since the on-disk entry here
+ * has *no* name bytes at all - name_len wrapping to 0 is precisely what
+ * would make the parser believe none were needed. */
+static int build_name_size_wraparound_image(const char *path) {
+    bytebuf inodes, dirs;
+    bb_init(&inodes);
+    bb_init(&dirs);
+
+    uint32_t file_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 2, 2); /* basic file */
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 0xFFFFFFFFu);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 5); /* file_size */
+
+    uint32_t root_listing_off = (uint32_t)dirs.len;
+    bb_u32(&dirs, 0); /* one entry */
+    bb_u32(&dirs, 0);
+    bb_u32(&dirs, 0);
+    bb_u16(&dirs, (uint16_t)file_off); /* offset */
+    bb_u16(&dirs, 0);                  /* inode_offset */
+    bb_u16(&dirs, 2);                  /* type */
+    bb_u16(&dirs, 0xFFFF);             /* name_size: wraps name_len to 0 if truncated */
+    /* No name bytes follow - if the parser reads name_len=0, that's
+     * consistent with the corrupted (wrapped) computation and it'll accept
+     * an empty name; if it reads the correct name_len=65536, `remaining`
+     * (far short of that) rejects it before any read is attempted. */
+    uint32_t root_listing_len = (uint32_t)(dirs.len - root_listing_off);
+
+    uint32_t root_off = (uint32_t)inodes.len;
+    write_inode_header(&inodes, 1, 1);
+    bb_u32(&inodes, 0);
+    bb_u32(&inodes, 1);
+    bb_u16(&inodes, (uint16_t)(root_listing_len + 3));
+    bb_u16(&inodes, (uint16_t)root_listing_off);
+    bb_u32(&inodes, 0);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 131072;
+    sb.block_log = 17;
+    sb.s_major = 4;
+    sb.root_inode = ((uint64_t)0 << 16) | root_off;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inodes.len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        bb_free(&inodes);
+        bb_free(&dirs);
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    uint16_t inode_hdr = (uint16_t)(inodes.len | 0x8000);
+    fwrite(&inode_hdr, sizeof(inode_hdr), 1, f);
+    fwrite(inodes.data, 1, inodes.len, f);
+    uint16_t dir_hdr = (uint16_t)(dirs.len | 0x8000);
+    fwrite(&dir_hdr, sizeof(dir_hdr), 1, f);
+    fwrite(dirs.data, 1, dirs.len, f);
+    fclose(f);
+
+    bb_free(&inodes);
+    bb_free(&dirs);
+    return 0;
+}
+
 static int expect_list_fails(const char *label, int (*builder)(const char *), const char *path) {
     if (builder(path) != 0) {
         fprintf(stderr, "FAIL: could not build %s fixture\n", label);
@@ -1197,6 +1267,9 @@ int main(void) {
     failures += expect_list_succeeds("an ordinary dotfile entry (\".hidden\")",
                                       build_dotfile_name_image,
                                       "test_fixture_squashfs_dotfile_name.img");
+    failures += expect_list_fails(
+        "a directory entry whose name_size (0xFFFF) wraps name_len to 0",
+        build_name_size_wraparound_image, "test_fixture_squashfs_name_size_wrap.img");
     if (failures > 0) {
         return 1;
     }

@@ -259,9 +259,22 @@ static void squashfs_inode_free(squashfs_inode *inode) {
  * position only exists as "wherever the cursor is right now"). */
 static int read_block_sizes(metadata_cursor *c, uint64_t file_size, uint64_t block_size,
                              uint32_t frag_index, squashfs_inode *out) {
-    uint64_t nblocks64 = (frag_index == SQUASHFS_INVALID_FRAG)
-                              ? (file_size + block_size - 1) / block_size
-                              : file_size / block_size;
+    uint64_t nblocks64;
+    if (frag_index == SQUASHFS_INVALID_FRAG) {
+        /* Ceiling division - file_size + (block_size - 1) can overflow
+         * uint64_t for a crafted file_size near UINT64_MAX, wrapping to a
+         * small value that would sail right past the MAX_BLOCKS_PER_FILE
+         * check below instead of being rejected by it. block_size is
+         * already validated (validate_block_size(), called before any
+         * want_content=1 read_inode()) to be a small power of two, so this
+         * only ever rejects an absurd file_size, never a real one. */
+        if (file_size > UINT64_MAX - (block_size - 1)) {
+            return -1;
+        }
+        nblocks64 = (file_size + block_size - 1) / block_size;
+    } else {
+        nblocks64 = file_size / block_size;
+    }
     if (nblocks64 > MAX_BLOCKS_PER_FILE) {
         return -1;
     }
@@ -522,9 +535,12 @@ static int is_windows_reserved_name(const char *name, size_t len) {
  * never produces any of these, so this can't reject legitimate images -
  * only crafted (or, for the device-name case, merely unlucky) ones. */
 static int path_component_is_safe(const char *name, size_t len) {
-    /* len is always >= 1 here: the caller derives it from the on-disk
-     * name_size field as name_size + 1 (off-by-one encoded), which can
-     * never underflow to 0. */
+    /* len is always >= 1 here: the caller computes it as
+     * (uint32_t)name_size + 1 (off-by-one encoded) *without* truncating
+     * back to uint16_t first - a name_size of 0xFFFF must become 65536,
+     * not wrap to 0, precisely so this can't be bypassed by an empty
+     * name. See process_dir_entry(), which also caps it at 256 before
+     * calling here. */
     if (len == 1 && name[0] == '.') {
         return 0;
     }
@@ -721,6 +737,10 @@ static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
     uint8_t *block_buf = (uint8_t *)malloc(sb->block_size);
     if (!block_buf) {
         fclose(out);
+        /* fopen("wb") already created (or truncated) disk_path - don't
+         * leave that empty file behind, same as every other failure path
+         * below. */
+        remove(disk_path);
         return -1;
     }
 
@@ -860,7 +880,12 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
     (void)inode_offset;
     (void)type; /* not trusted for is_dir — see below */
 
-    uint16_t name_len = (uint16_t)(name_size + 1);
+    /* Widened to uint32_t deliberately: name_size is a full uint16_t
+     * (0-65535), so name_size + 1 can reach 65536 - computing this in
+     * uint16_t would wrap 0xFFFF + 1 back to 0, producing an empty name
+     * that sails past both checks below and past path_component_is_safe()
+     * itself. A crafted image can and does set name_size to 0xFFFF. */
+    uint32_t name_len = (uint32_t)name_size + 1;
     if (*remaining < name_len || name_len > 256) {
         return -1;
     }
