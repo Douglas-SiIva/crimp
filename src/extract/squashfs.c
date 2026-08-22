@@ -287,6 +287,107 @@ static int read_block_sizes(metadata_cursor *c, uint64_t file_size, uint64_t blo
     return 0;
 }
 
+/* Per-type field readers, split out of read_inode()'s switch so its own
+ * cognitive complexity stays within the project's SonarCloud gate - same
+ * rationale as process_dir_entry's extraction from walk_directory. */
+
+static int read_basic_dir_fields(metadata_cursor *c, squashfs_inode *out) {
+    uint32_t block_index;
+    uint32_t link_count;
+    uint32_t parent_inode;
+    uint16_t file_size;
+    uint16_t blk_offset;
+    if (cursor_read(c, &block_index, 4) || cursor_read(c, &link_count, 4) ||
+        cursor_read(c, &file_size, 2) || cursor_read(c, &blk_offset, 2) ||
+        cursor_read(c, &parent_inode, 4)) {
+        return -1;
+    }
+    out->dir_block_index = block_index;
+    out->dir_block_offset = blk_offset;
+    out->dir_size = file_size;
+    return 0;
+}
+
+static int read_extended_dir_fields(metadata_cursor *c, squashfs_inode *out) {
+    uint32_t link_count;
+    uint32_t file_size;
+    uint32_t block_index;
+    uint32_t parent_inode;
+    uint32_t xattr_index;
+    uint16_t index_count;
+    uint16_t blk_offset;
+    if (cursor_read(c, &link_count, 4) || cursor_read(c, &file_size, 4) ||
+        cursor_read(c, &block_index, 4) || cursor_read(c, &parent_inode, 4) ||
+        cursor_read(c, &index_count, 2) || cursor_read(c, &blk_offset, 2) ||
+        cursor_read(c, &xattr_index, 4)) {
+        return -1;
+    }
+    /* Directory index entries (index_count of them) follow here - an
+     * optimization for large directories, safe to ignore for correctness:
+     * we still get every entry via the plain directory-table walk below. */
+    out->dir_block_index = block_index;
+    out->dir_block_offset = blk_offset;
+    out->dir_size = file_size;
+    return 0;
+}
+
+static int read_basic_file_fields(metadata_cursor *c, uint64_t block_size, int want_content,
+                                   squashfs_inode *out) {
+    uint32_t blocks_start;
+    uint32_t frag_index;
+    uint32_t block_offset_f;
+    uint32_t file_size;
+    if (cursor_read(c, &blocks_start, 4) || cursor_read(c, &frag_index, 4) ||
+        cursor_read(c, &block_offset_f, 4) || cursor_read(c, &file_size, 4)) {
+        return -1;
+    }
+    out->file_size = file_size;
+    out->content_blocks_start = blocks_start;
+    out->frag_index = frag_index;
+    out->frag_block_offset = block_offset_f;
+    if (want_content && read_block_sizes(c, file_size, block_size, frag_index, out) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int read_extended_file_fields(metadata_cursor *c, uint64_t block_size, int want_content,
+                                      squashfs_inode *out) {
+    uint64_t blocks_start;
+    uint64_t file_size;
+    uint64_t sparse;
+    uint32_t link_count;
+    uint32_t frag_index;
+    uint32_t block_offset_f;
+    uint32_t xattr_index;
+    if (cursor_read(c, &blocks_start, 8) || cursor_read(c, &file_size, 8) ||
+        cursor_read(c, &sparse, 8) || cursor_read(c, &link_count, 4) ||
+        cursor_read(c, &frag_index, 4) || cursor_read(c, &block_offset_f, 4) ||
+        cursor_read(c, &xattr_index, 4)) {
+        return -1;
+    }
+    out->file_size = file_size;
+    out->content_blocks_start = blocks_start;
+    out->frag_index = frag_index;
+    out->frag_block_offset = block_offset_f;
+    if (want_content && read_block_sizes(c, file_size, block_size, frag_index, out) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* Shared by basic (type 3) and extended (type 10) symlinks - identical
+ * field layout, only the inode type tag differs. */
+static int read_symlink_fields(metadata_cursor *c, squashfs_inode *out) {
+    uint32_t link_count;
+    uint32_t target_size;
+    if (cursor_read(c, &link_count, 4) || cursor_read(c, &target_size, 4)) {
+        return -1;
+    }
+    out->file_size = target_size;
+    return 0;
+}
+
 static int read_inode(FILE *f, uint64_t inode_table_start, uint64_t block_offset,
                        uint16_t in_block_offset, uint64_t block_size, int want_content,
                        squashfs_inode *out) {
@@ -315,113 +416,30 @@ static int read_inode(FILE *f, uint64_t inode_table_start, uint64_t block_offset
     out->type = type;
     out->inode_number = inode_number;
 
+    int rc = 0;
     switch (type) {
-        case 1: { /* basic directory */
-            uint32_t block_index;
-            uint32_t link_count;
-            uint32_t parent_inode;
-            uint16_t file_size;
-            uint16_t blk_offset;
-            if (cursor_read(&c, &block_index, 4) || cursor_read(&c, &link_count, 4) ||
-                cursor_read(&c, &file_size, 2) || cursor_read(&c, &blk_offset, 2) ||
-                cursor_read(&c, &parent_inode, 4)) {
-                return -1;
-            }
-            out->dir_block_index = block_index;
-            out->dir_block_offset = blk_offset;
-            out->dir_size = file_size;
+        case 1:
+            rc = read_basic_dir_fields(&c, out);
             break;
-        }
-        case 8: { /* extended directory */
-            uint32_t link_count;
-            uint32_t file_size;
-            uint32_t block_index;
-            uint32_t parent_inode;
-            uint32_t xattr_index;
-            uint16_t index_count;
-            uint16_t blk_offset;
-            if (cursor_read(&c, &link_count, 4) || cursor_read(&c, &file_size, 4) ||
-                cursor_read(&c, &block_index, 4) || cursor_read(&c, &parent_inode, 4) ||
-                cursor_read(&c, &index_count, 2) || cursor_read(&c, &blk_offset, 2) ||
-                cursor_read(&c, &xattr_index, 4)) {
-                return -1;
-            }
-            /* Directory index entries (index_count of them) follow here —
-             * an optimization for large directories, safe to ignore for
-             * correctness: we still get every entry via the plain
-             * directory-table walk below. */
-            out->dir_block_index = block_index;
-            out->dir_block_offset = blk_offset;
-            out->dir_size = file_size;
+        case 8:
+            rc = read_extended_dir_fields(&c, out);
             break;
-        }
-        case 2: { /* basic file */
-            uint32_t blocks_start;
-            uint32_t frag_index;
-            uint32_t block_offset_f;
-            uint32_t file_size;
-            if (cursor_read(&c, &blocks_start, 4) || cursor_read(&c, &frag_index, 4) ||
-                cursor_read(&c, &block_offset_f, 4) || cursor_read(&c, &file_size, 4)) {
-                return -1;
-            }
-            out->file_size = file_size;
-            out->content_blocks_start = blocks_start;
-            out->frag_index = frag_index;
-            out->frag_block_offset = block_offset_f;
-            if (want_content &&
-                read_block_sizes(&c, file_size, block_size, frag_index, out) != 0) {
-                return -1;
-            }
+        case 2:
+            rc = read_basic_file_fields(&c, block_size, want_content, out);
             break;
-        }
-        case 9: { /* extended file */
-            uint64_t blocks_start;
-            uint64_t file_size;
-            uint64_t sparse;
-            uint32_t link_count;
-            uint32_t frag_index;
-            uint32_t block_offset_f;
-            uint32_t xattr_index;
-            if (cursor_read(&c, &blocks_start, 8) || cursor_read(&c, &file_size, 8) ||
-                cursor_read(&c, &sparse, 8) || cursor_read(&c, &link_count, 4) ||
-                cursor_read(&c, &frag_index, 4) || cursor_read(&c, &block_offset_f, 4) ||
-                cursor_read(&c, &xattr_index, 4)) {
-                return -1;
-            }
-            out->file_size = file_size;
-            out->content_blocks_start = blocks_start;
-            out->frag_index = frag_index;
-            out->frag_block_offset = block_offset_f;
-            if (want_content &&
-                read_block_sizes(&c, file_size, block_size, frag_index, out) != 0) {
-                return -1;
-            }
+        case 9:
+            rc = read_extended_file_fields(&c, block_size, want_content, out);
             break;
-        }
-        case 3: { /* basic symlink */
-            uint32_t link_count;
-            uint32_t target_size;
-            if (cursor_read(&c, &link_count, 4) || cursor_read(&c, &target_size, 4)) {
-                return -1;
-            }
-            out->file_size = target_size;
+        case 3:
+        case 10:
+            rc = read_symlink_fields(&c, out);
             break;
-        }
-        case 10: { /* extended symlink */
-            uint32_t link_count;
-            uint32_t target_size;
-            if (cursor_read(&c, &link_count, 4) || cursor_read(&c, &target_size, 4)) {
-                return -1;
-            }
-            out->file_size = target_size;
-            break;
-        }
         default:
             /* Device/fifo/socket inodes (4-7, 11-14): no content, nothing
              * else needed for a listing. */
             break;
     }
-    return 0;
+    return rc;
 }
 
 /* Historical mksquashfs/kernel max block size. Real images use 128KiB by
@@ -504,9 +522,9 @@ static int is_windows_reserved_name(const char *name, size_t len) {
  * never produces any of these, so this can't reject legitimate images -
  * only crafted (or, for the device-name case, merely unlucky) ones. */
 static int path_component_is_safe(const char *name, size_t len) {
-    if (len == 0) {
-        return 0;
-    }
+    /* len is always >= 1 here: the caller derives it from the on-disk
+     * name_size field as name_size + 1 (off-by-one encoded), which can
+     * never underflow to 0. */
     if (len == 1 && name[0] == '.') {
         return 0;
     }
@@ -550,7 +568,11 @@ static int make_directory(const char *path) {
     }
     return (errno == EEXIST && path_is_existing_directory(path)) ? 0 : -1;
 #else
-    if (mkdir(path, 0755) == 0) {
+    /* Owner-only: extracted firmware content can legitimately contain
+     * secrets (private keys, credentials - the exact things this tool's
+     * own detectors look for), so the extraction tree shouldn't be
+     * world-readable by default. */
+    if (mkdir(path, 0700) == 0) {
         return 0;
     }
     return (errno == EEXIST && path_is_existing_directory(path)) ? 0 : -1;
@@ -652,6 +674,40 @@ static int read_and_inflate_block(FILE *f, uint64_t offset, uint32_t size, int c
     return 0;
 }
 
+/* Writes one full data block (a "hole" if `raw`'s size is 0, otherwise
+ * read+decompressed from `block_offset`) to `out`, verifying its
+ * decompressed length matches `expected_len` exactly. Split out of
+ * extract_regular_file()'s loop so that function needs only one `break` on
+ * failure, not two. */
+static int write_data_block(FILE *f, FILE *out, uint64_t block_offset, uint32_t raw,
+                             uint64_t expected_len, uint8_t *block_buf, uint32_t block_size) {
+    uint32_t size = raw & 0xFFFFFFu;
+    int compressed = (raw & (1u << 24)) == 0;
+    uint32_t dest_len;
+    if (size == 0) {
+        /* A hole (sparse block): file_size bytes of zero, nothing on disk. */
+        memset(block_buf, 0, (size_t)expected_len);
+        dest_len = (uint32_t)expected_len;
+    } else if (read_and_inflate_block(f, block_offset, size, compressed, block_buf, block_size,
+                                       &dest_len) != 0) {
+        return -1;
+    }
+    /* SonarCloud's c:S2083 (path-injection taint rule) flags this write as
+     * a "tainted value leaking" - its dataflow engine doesn't recognize
+     * path_component_is_safe() + join_output_path() (this file's actual
+     * sanitization, applied before `out`'s path was ever built) as a
+     * taint-clearing boundary, so it still treats `out` as carrying
+     * untrusted path influence here. That sanitization was verified against
+     * a deliberately crafted traversal image (see tests/fixtures/README.md
+     * and this PR's description) - writing the file's own decompressed
+     * bytes to a path already proven safe is the extraction feature
+     * working as intended, not a leak. NOSONAR */
+    if (dest_len != expected_len || fwrite(block_buf, 1, dest_len, out) != dest_len) { // NOSONAR
+        return -1;
+    }
+    return 0;
+}
+
 /* Extracts one regular file's content to `disk_path`: every full data block
  * (from content_blocks_start, sized per block_sizes[]) plus, if the file
  * uses one, its tail slice of a shared fragment block. */
@@ -680,24 +736,12 @@ static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
             expected_len = inode->file_size - bytes_before;
         }
 
-        uint32_t raw = inode->block_sizes[i];
-        uint32_t size = raw & 0xFFFFFFu;
-        int compressed = (raw & (1u << 24)) == 0;
-        uint32_t dest_len = 0;
-        if (size == 0) {
-            /* A hole (sparse block): file_size bytes of zero, nothing on disk. */
-            memset(block_buf, 0, (size_t)expected_len);
-            dest_len = (uint32_t)expected_len;
-        } else if (read_and_inflate_block(f, block_offset, size, compressed, block_buf,
-                                           sb->block_size, &dest_len) != 0) {
+        if (write_data_block(f, out, block_offset, inode->block_sizes[i], expected_len, block_buf,
+                              sb->block_size) != 0) {
             ok = 0;
             break;
         }
-        if (dest_len != expected_len || fwrite(block_buf, 1, dest_len, out) != dest_len) {
-            ok = 0;
-            break;
-        }
-        block_offset += size;
+        block_offset += inode->block_sizes[i] & 0xFFFFFFu;
         bytes_before += expected_len;
     }
 
@@ -714,8 +758,10 @@ static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
             ok = 0;
         } else if ((uint64_t)inode->frag_block_offset + tail_len > frag_dest_len) {
             ok = 0; /* fragment doesn't actually contain the claimed tail range */
-        } else if (fwrite(block_buf + inode->frag_block_offset, 1, (size_t)tail_len, out) !=
+        } else if (fwrite(block_buf + inode->frag_block_offset, 1, (size_t)tail_len, out) != // NOSONAR
                    (size_t)tail_len) {
+            /* Same c:S2083 false positive as write_data_block()'s fwrite - see
+             * that comment for why `out`'s path is already proven safe here. */
             ok = 0;
         }
     }

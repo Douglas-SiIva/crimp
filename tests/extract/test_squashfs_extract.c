@@ -257,6 +257,29 @@ static int build_empty_dir_image(const char *path) {
     return 0;
 }
 
+/* A superblock claiming a block_size below the spec's 4096-byte minimum -
+ * regression test for validate_block_size()'s lower bound. Only the
+ * superblock needs to be well-formed; extraction must be rejected before
+ * anything else in the file is even read. */
+static int build_tiny_block_size_image(const char *path) {
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.block_size = 2048; /* below MIN_SQUASHFS_BLOCK_SIZE, still a power of two */
+    sb.block_log = 11;
+    sb.s_major = 4;
+    sb.root_inode = 0;
+    sb.inode_table_start = sizeof(test_superblock);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+    fclose(f);
+    return 0;
+}
+
 static int make_test_directory(const char *path) {
 #if defined(_WIN32)
     return _mkdir(path);
@@ -360,6 +383,22 @@ int main(void) {
                 "FAIL: expected crimp_squashfs_extract to fail when 'emptydir' already exists as "
                 "a regular file, not a directory\n");
         crimp_squashfs_entry_list_free(&collision_list);
+        return 1;
+    }
+
+    /* block_size below the spec minimum must be rejected up front. */
+    const char *tiny_block_path = "test_fixture_squashfs_tiny_block_size.img";
+    if (build_tiny_block_size_image(tiny_block_path) != 0) {
+        fprintf(stderr, "FAIL: could not build tiny-block-size fixture\n");
+        return 1;
+    }
+    const char *tiny_block_out_dir = "squashfs_extract_tiny_block_output";
+    crimp_squashfs_entry_list tiny_block_list;
+    if (crimp_squashfs_extract(tiny_block_path, tiny_block_out_dir, &tiny_block_list) == 0) {
+        fprintf(stderr,
+                "FAIL: expected crimp_squashfs_extract to reject a block_size below the spec "
+                "minimum\n");
+        crimp_squashfs_entry_list_free(&tiny_block_list);
         return 1;
     }
 
