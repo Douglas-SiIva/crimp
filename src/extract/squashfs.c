@@ -253,12 +253,27 @@ static void squashfs_inode_free(squashfs_inode *inode) {
  * claims. */
 #define MAX_BLOCKS_PER_FILE (1u << 20)
 
+/* Independent of MAX_BLOCKS_PER_FILE above: that one bounds the
+ * block_sizes[] array allocation, not how many bytes extraction actually
+ * writes to disk. A "hole" block (block_sizes[i] == 0, a spec-legal sparse
+ * block) costs nothing to claim in the image but still costs a real,
+ * equally-sized write once extracted - so a file built entirely out of
+ * holes, or out of tiny highly-compressible blocks, can claim up to
+ * MAX_BLOCKS_PER_FILE * MAX_SQUASHFS_BLOCK_SIZE (~1TiB) from an image only
+ * a few KB in size. Reject a file_size no real firmware component needs,
+ * independent of how it's spread across blocks, before ever starting to
+ * extract it. */
+#define MAX_EXTRACTED_FILE_SIZE (4ull << 30) /* 4GiB */
+
 /* Reads the block_sizes[] array immediately following a regular file
  * inode's fixed fields (still on the same metadata cursor `c`, which is why
  * this can't be deferred to a later, separate pass - the array's file
  * position only exists as "wherever the cursor is right now"). */
 static int read_block_sizes(metadata_cursor *c, uint64_t file_size, uint64_t block_size,
                              uint32_t frag_index, squashfs_inode *out) {
+    if (file_size > MAX_EXTRACTED_FILE_SIZE) {
+        return -1;
+    }
     uint64_t nblocks64;
     if (frag_index == SQUASHFS_INVALID_FRAG) {
         /* Ceiling division - file_size + (block_size - 1) can overflow
@@ -559,15 +574,34 @@ static int path_component_is_safe(const char *name, size_t len) {
     return 1;
 }
 
-/* Returns 1 if `path` exists and is a directory, 0 otherwise (including on
- * stat failure). */
+/* Returns 1 if `path` exists and is *itself* a real directory, 0
+ * otherwise (including on stat failure or if it's a symlink/junction -
+ * deliberately not followed, even one pointing at a real directory: a
+ * symlink planted at this path before extraction started must not be
+ * mistaken for "already the directory we wanted", or files meant for
+ * output_dir would be written through it instead). */
 static int path_is_existing_directory(const char *path) {
 #if defined(_WIN32)
     DWORD attrs = GetFileAttributesA(path);
-    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+           (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
 #else
     struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+/* Returns 1 if `path` already exists and is a symlink (POSIX) or reparse
+ * point (Windows - junctions and symlinks both set this flag), 0 otherwise.
+ * Neither branch follows the link to check what it points to - the point
+ * is to detect its presence without ever opening through it. */
+static int path_is_symlink(const char *path) {
+#if defined(_WIN32)
+    DWORD attrs = GetFileAttributesA(path);
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+#else
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
 #endif
 }
 
@@ -729,6 +763,15 @@ static int write_data_block(FILE *f, FILE *out, uint64_t block_offset, uint32_t 
  * uses one, its tail slice of a shared fragment block. */
 static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
                                  const squashfs_inode *inode, const char *disk_path) {
+    /* fopen("wb") follows symlinks - a symlink planted at this exact path
+     * before extraction started (e.g. output_dir reused across runs, or
+     * otherwise not fully attacker-free) would make it write through the
+     * link instead of creating a real file here, escaping the containment
+     * path_component_is_safe() and join_output_path() otherwise guarantee.
+     * Refuse outright rather than follow it. */
+    if (path_is_symlink(disk_path)) {
+        return -1;
+    }
     FILE *out = fopen(disk_path, "wb");
     if (!out) {
         return -1;

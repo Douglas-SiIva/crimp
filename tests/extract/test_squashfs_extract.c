@@ -1,3 +1,13 @@
+#if defined(_WIN32)
+/* Must be forced before any header (including ones stdint.h/stdio.h may
+ * transitively pull in) sets a lower default - CreateSymbolicLinkA below
+ * is only declared for _WIN32_WINNT >= 0x0600 (Vista+). */
+#ifdef _WIN32_WINNT
+#undef _WIN32_WINNT
+#endif
+#define _WIN32_WINNT 0x0600
+#endif
+
 #include "extract_internal.h"
 
 #include <stdint.h>
@@ -7,8 +17,10 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <windows.h>
 #else
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #ifndef FIXTURE_PATH
@@ -441,6 +453,93 @@ static int build_uncompressed_block_image(const char *path) {
     return 0;
 }
 
+/* An extended-file inode with file_size = 5GiB and a 1MiB (max legal)
+ * block_size - satisfies the pre-existing MAX_BLOCKS_PER_FILE cap
+ * (ceil(5GiB / 1MiB) = 5120 blocks, far under it) but must still be
+ * rejected by MAX_EXTRACTED_FILE_SIZE, which exists specifically because
+ * MAX_BLOCKS_PER_FILE alone doesn't bound actual on-disk bytes written
+ * (see the comment on MAX_EXTRACTED_FILE_SIZE). frag_index is INVALID so
+ * no fragment table is needed - the cap is checked before any block_sizes
+ * work happens. */
+static int build_oversized_file_size_image(const char *path) {
+    const uint16_t file_inode_len = 16 + 8 + 8 + 8 + 4 + 4 + 4 + 4;
+    const uint16_t root_inode_len = 16 + 16;
+    const uint16_t inode_blob_len = (uint16_t)(file_inode_len + root_inode_len);
+    const char name[] = "big.bin";
+    const uint16_t name_len = (uint16_t)(sizeof(name) - 1);
+    const uint16_t dir_entry_len = (uint16_t)(8 + name_len);
+    const uint16_t dir_blob_len = (uint16_t)(12 + dir_entry_len);
+
+    test_superblock sb;
+    memset(&sb, 0, sizeof(sb));
+    memcpy(&sb.magic, "hsqs", 4);
+    sb.inodes = 2;
+    sb.block_size = 1048576; /* 1MiB: the max legal block_size */
+    sb.block_log = 20;
+    sb.s_major = 4;
+    sb.root_inode = file_inode_len;
+    sb.inode_table_start = sizeof(test_superblock);
+    sb.directory_table_start = sb.inode_table_start + 2 + inode_blob_len;
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return -1;
+    }
+    fwrite(&sb, sizeof(sb), 1, f);
+
+    fw16(f, (uint16_t)(inode_blob_len | 0x8000));
+    fw16(f, 9); /* extended file */
+    fw16(f, 0);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw32(f, 0);
+    fw32(f, 2);
+    fw64(f, 0);
+    fw64(f, 5ull * 1024 * 1024 * 1024); /* file_size: 5GiB, over the 4GiB cap */
+    fw64(f, 0);
+    fw32(f, 1);
+    fw32(f, 0xFFFFFFFFu); /* frag_index: none */
+    fw32(f, 0);
+    fw32(f, 0xFFFFFFFFu);
+
+    fw16(f, 1);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw32(f, 0);
+    fw32(f, 1);
+    fw32(f, 0);
+    fw32(f, 1);
+    fw16(f, (uint16_t)(dir_blob_len + 3));
+    fw16(f, 0);
+    fw32(f, 0);
+
+    fw16(f, (uint16_t)(dir_blob_len | 0x8000));
+    fw32(f, 0);
+    fw32(f, 0);
+    fw32(f, 0);
+    fw16(f, 0);
+    fw16(f, 0);
+    fw16(f, 2);
+    fw16(f, (uint16_t)(name_len - 1));
+    fwrite(name, 1, name_len, f);
+    fclose(f);
+    return 0;
+}
+
+/* Portable "create a symlink pointing at target": returns 0 on success,
+ * -1 on any failure. On Windows, creating one requires either Developer
+ * Mode or an elevated/privileged process - CI runners may or may not have
+ * either, so callers must treat failure here as "can't test this", not
+ * "the fix is broken". */
+static int make_symlink(const char *target, const char *link_path) {
+#if defined(_WIN32)
+    return CreateSymbolicLinkA(link_path, target, 0) ? 0 : -1;
+#else
+    return symlink(target, link_path);
+#endif
+}
+
 static int make_test_directory(const char *path) {
 #if defined(_WIN32)
     return _mkdir(path);
@@ -640,6 +739,67 @@ int main(void) {
                 "fragment (block-count overflow)\n");
         crimp_squashfs_entry_list_free(&huge_size_list);
         return 1;
+    }
+
+    /* file_size = 5GiB with a legal (1MiB) block_size satisfies the
+     * block-count cap but must still be rejected by the independent
+     * total-file-size cap - regression test for the disk-exhaustion
+     * finding (a file built mostly of "holes" or tiny highly-compressible
+     * blocks could otherwise claim up to ~1TiB from a tiny image). */
+    const char *oversized_path = "test_fixture_squashfs_oversized_file_size.img";
+    if (build_oversized_file_size_image(oversized_path) != 0) {
+        fprintf(stderr, "FAIL: could not build oversized-file-size fixture\n");
+        return 1;
+    }
+    const char *oversized_out_dir = "squashfs_extract_oversized_output";
+    crimp_squashfs_entry_list oversized_list;
+    if (crimp_squashfs_extract(oversized_path, oversized_out_dir, &oversized_list) == 0) {
+        fprintf(stderr,
+                "FAIL: expected crimp_squashfs_extract to reject file_size=5GiB (over the "
+                "MAX_EXTRACTED_FILE_SIZE cap) even with a block count under the separate cap\n");
+        crimp_squashfs_entry_list_free(&oversized_list);
+        return 1;
+    }
+
+    /* A symlink already sitting at the exact path a real fixture entry
+     * will extract to must not be followed. Best-effort: creating a
+     * symlink can fail for reasons unrelated to this fix (missing
+     * privilege on Windows), in which case this check is skipped rather
+     * than failed. */
+    const char *symlink_out_dir = "squashfs_extract_symlink_output";
+    make_test_directory(symlink_out_dir);
+    char planted_symlink_path[1024];
+    snprintf(planted_symlink_path, sizeof(planted_symlink_path), "%s/etc", symlink_out_dir);
+    /* etc/ needs to exist as a directory in output_dir before its child
+     * "config.txt" would be extracted - plant the symlink where the file
+     * itself will land by pre-creating etc/ for real, then symlinking the
+     * spot config.txt should occupy. */
+    make_test_directory(planted_symlink_path);
+    char planted_target[1024];
+    snprintf(planted_target, sizeof(planted_target), "%s/escaped_target", symlink_out_dir);
+    char planted_config_path[1024];
+    snprintf(planted_config_path, sizeof(planted_config_path), "%s/config.txt", planted_symlink_path);
+    if (make_symlink(planted_target, planted_config_path) == 0) {
+        crimp_squashfs_entry_list symlink_list;
+        int symlink_rc = crimp_squashfs_extract(FIXTURE_PATH, symlink_out_dir, &symlink_list);
+        if (symlink_rc == 0) {
+            fprintf(stderr,
+                    "FAIL: expected crimp_squashfs_extract to reject writing through a "
+                    "pre-planted symlink at '%s'\n",
+                    planted_config_path);
+            crimp_squashfs_entry_list_free(&symlink_list);
+            return 1;
+        }
+        FILE *escaped = fopen(planted_target, "rb");
+        if (escaped) {
+            fclose(escaped);
+            fprintf(stderr, "FAIL: content was written through the symlink to '%s'\n",
+                    planted_target);
+            return 1;
+        }
+    } else {
+        printf("NOTE: could not create a test symlink (likely missing privilege on this "
+               "platform) - skipping the symlink-containment check\n");
     }
 
     printf("PASS: crimp_squashfs_extract content matches unsquashfs -d ground truth\n");
