@@ -9,6 +9,7 @@
 #include <errno.h>
 #if defined(_WIN32)
 #include <direct.h>
+#include <windows.h>
 #else
 #include <sys/stat.h>
 #endif
@@ -431,8 +432,14 @@ static int read_inode(FILE *f, uint64_t inode_table_start, uint64_t block_offset
  * for free from their fixed 8KiB buffer). */
 #define MAX_SQUASHFS_BLOCK_SIZE (1u << 20)
 
+/* Spec/mksquashfs minimum - anything smaller isn't just unusual, it's
+ * invalid, and would otherwise surface later as a confusing generic
+ * failure (e.g. hitting MAX_BLOCKS_PER_FILE on any realistically-sized
+ * file) instead of being rejected here with a clear cause. */
+#define MIN_SQUASHFS_BLOCK_SIZE 4096u
+
 static int validate_block_size(uint32_t block_size) {
-    if (block_size == 0 || block_size > MAX_SQUASHFS_BLOCK_SIZE) {
+    if (block_size < MIN_SQUASHFS_BLOCK_SIZE || block_size > MAX_SQUASHFS_BLOCK_SIZE) {
         return -1;
     }
     if ((block_size & (block_size - 1)) != 0) { /* spec requires power of two */
@@ -441,12 +448,61 @@ static int validate_block_size(uint32_t block_size) {
     return 0;
 }
 
+/* Windows reserves these as device names regardless of extension or case
+ * ("con", "CON", "con.txt" are all the console device, not a creatable
+ * file) - a real hazard here since this project's documented build target
+ * is Windows/MinGW, and an image built on Linux (where these are ordinary
+ * filenames) can carry one without anything else being wrong with it. */
+static const char *const WINDOWS_RESERVED_NAMES[] = {
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5",
+    "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
+    "lpt6", "lpt7", "lpt8", "lpt9",
+};
+#define WINDOWS_RESERVED_NAME_COUNT \
+    (sizeof(WINDOWS_RESERVED_NAMES) / sizeof(WINDOWS_RESERVED_NAMES[0]))
+
+static int is_windows_reserved_name(const char *name, size_t len) {
+    size_t base_len = 0;
+    while (base_len < len && name[base_len] != '.') {
+        base_len++;
+    }
+    if (base_len == 0 || base_len > 4) {
+        return 0; /* every reserved name's base is 3-4 chars */
+    }
+    for (size_t r = 0; r < WINDOWS_RESERVED_NAME_COUNT; r++) {
+        const char *reserved = WINDOWS_RESERVED_NAMES[r];
+        if (strlen(reserved) != base_len) {
+            continue;
+        }
+        int match = 1;
+        for (size_t i = 0; i < base_len; i++) {
+            char c = name[i];
+            if (c >= 'A' && c <= 'Z') {
+                c = (char)(c - 'A' + 'a');
+            }
+            if (c != reserved[i]) {
+                match = 0;
+                break;
+            }
+        }
+        if (match) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* A directory-table entry name is untrusted. Reject anything that could
- * turn "output_dir + name" into a path escaping output_dir once joined:
- * ".", "..", and any embedded path separator (both "/" and "\\", since a
+ * turn "output_dir + name" into a path escaping output_dir once joined
+ * (".", "..", any embedded path separator - both "/" and "\\", since a
  * name crafted on one platform must not escape when Crimp runs on the
- * other) or drive-letter colon. Real mksquashfs never produces such names,
- * so this can't reject legitimate images - only crafted ones. */
+ * other - or drive-letter colon), anything that would silently truncate
+ * once C-string functions touch it (an embedded NUL byte - name_len is
+ * trusted for bounds-checking raw bytes, but %s/strlen stop at the first
+ * NUL regardless, so two differently-named entries could collide onto the
+ * same disk path), or a Windows-reserved device name. Real mksquashfs
+ * never produces any of these, so this can't reject legitimate images -
+ * only crafted (or, for the device-name case, merely unlucky) ones. */
 static int path_component_is_safe(const char *name, size_t len) {
     if (len == 0) {
         return 0;
@@ -459,24 +515,45 @@ static int path_component_is_safe(const char *name, size_t len) {
     }
     for (size_t i = 0; i < len; i++) {
         char c = name[i];
-        if (c == '/' || c == '\\' || c == ':') {
+        if (c == '/' || c == '\\' || c == ':' || c == '\0') {
             return 0;
         }
+    }
+    if (is_windows_reserved_name(name, len)) {
+        return 0;
     }
     return 1;
 }
 
+/* Returns 1 if `path` exists and is a directory, 0 otherwise (including on
+ * stat failure). */
+static int path_is_existing_directory(const char *path) {
+#if defined(_WIN32)
+    DWORD attrs = GetFileAttributesA(path);
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+/* mkdir() reporting EEXIST only means *something* is already there - not
+ * necessarily a directory. Without checking, a stale regular file left at
+ * this path (e.g. from a previous extraction run into the same output_dir)
+ * would make this report success while the walk still believes it can
+ * recurse into a real directory, turning every child underneath into a
+ * confusing failure far from the actual cause. */
 static int make_directory(const char *path) {
 #if defined(_WIN32)
     if (_mkdir(path) == 0) {
         return 0;
     }
-    return errno == EEXIST ? 0 : -1;
+    return (errno == EEXIST && path_is_existing_directory(path)) ? 0 : -1;
 #else
     if (mkdir(path, 0755) == 0) {
         return 0;
     }
-    return errno == EEXIST ? 0 : -1;
+    return (errno == EEXIST && path_is_existing_directory(path)) ? 0 : -1;
 #endif
 }
 
@@ -645,7 +722,15 @@ static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
 
     free(block_buf);
     fclose(out);
-    return ok ? 0 : -1;
+    if (!ok) {
+        /* Don't leave a truncated/partial file behind - a caller that
+         * inspects output_dir independently of this function's return
+         * value (a detector walking the tree, say) has no way to tell a
+         * genuinely short file from one that stopped mid-write. */
+        remove(disk_path);
+        return -1;
+    }
+    return 0;
 }
 
 void crimp_squashfs_entry_list_init(crimp_squashfs_entry_list *list) {
@@ -750,10 +835,18 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
     }
 
     char child_path[1024];
+    int child_path_len;
     if (parent_path[0] == '\0') {
-        snprintf(child_path, sizeof(child_path), "%s", name);
+        child_path_len = snprintf(child_path, sizeof(child_path), "%s", name);
     } else {
-        snprintf(child_path, sizeof(child_path), "%s/%s", parent_path, name);
+        child_path_len = snprintf(child_path, sizeof(child_path), "%s/%s", parent_path, name);
+    }
+    /* A silently truncated path is exactly as unsafe as a traversal - it
+     * could collide with an unrelated, shorter path (see join_output_path's
+     * same reasoning below). Deep enough trees with long enough names can
+     * genuinely overflow this buffer; reject rather than guess. */
+    if (child_path_len < 0 || (size_t)child_path_len >= sizeof(child_path)) {
+        return -1;
     }
 
     squashfs_inode child;
@@ -906,6 +999,13 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
  * path_component_is_safe()-checked entry names, so nothing can escape it. */
 int crimp_squashfs_extract(const char *path, const char *output_dir,
                             crimp_squashfs_entry_list *out) {
+    /* Initialized before any failure path below, unlike crimp_squashfs_list
+     * (whose fopen/read_superblock failures leave `out` untouched) - this
+     * function's callers are extracting to disk on a code path that's more
+     * naturally paired with "always free `out` when done", so make that
+     * always safe rather than conditional on which check failed. */
+    crimp_squashfs_entry_list_init(out);
+
     FILE *f = fopen(path, "rb");
     if (!f) {
         return -1;
@@ -924,8 +1024,6 @@ int crimp_squashfs_extract(const char *path, const char *output_dir,
         fclose(f);
         return -1;
     }
-
-    crimp_squashfs_entry_list_init(out);
 
     uint64_t root_block = sb.root_inode >> 16;
     uint16_t root_offset = (uint16_t)(sb.root_inode & 0xFFFF);
