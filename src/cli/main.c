@@ -65,6 +65,8 @@ static const char *fs_type_name(crimp_fs_type type) {
             return "squashfs";
         case CRIMP_FS_CRAMFS:
             return "cramfs";
+        case CRIMP_FS_JFFS2:
+            return "jffs2";
         default:
             return "unknown";
     }

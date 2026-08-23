@@ -16,8 +16,9 @@ int crimp_fs_identify(const char *path, crimp_fs_info *out) {
     if (crimp_cramfs_identify(path, out) == 0) {
         return 0;
     }
-
-    /* JFFS2 (#8) goes here once implemented. */
+    if (crimp_jffs2_identify(path, out) == 0) {
+        return 0;
+    }
 
     return -1;
 }
@@ -28,6 +29,9 @@ const char *crimp_fs_compression_name(crimp_fs_type type, uint16_t compression) 
     }
     if (type == CRIMP_FS_CRAMFS) {
         return crimp_cramfs_compression_name();
+    }
+    if (type == CRIMP_FS_JFFS2) {
+        return crimp_jffs2_compression_name();
     }
     return "unknown";
 }
@@ -96,8 +100,10 @@ static int extract_dispatch(const char *path, const char *dir) {
         crimp_fs_entry_list_free(&list);
         return 0;
     }
-
-    /* JFFS2 (#8) goes here once implemented. */
+    if (crimp_jffs2_extract(path, dir, &list) == 0) {
+        crimp_fs_entry_list_free(&list);
+        return 0;
+    }
 
     return -1;
 }
