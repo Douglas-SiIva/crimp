@@ -15,8 +15,8 @@ typedef enum {
 } crimp_severity;
 
 typedef struct {
-    const char *detector_name;
-    char *description; /* owned copy — see crimp_finding_list_add */
+    char *detector_name; /* owned copy — see crimp_finding_list_add */
+    char *description;   /* owned copy — see crimp_finding_list_add */
     crimp_severity severity;
 } crimp_finding;
 
@@ -28,9 +28,15 @@ typedef struct {
 
 void crimp_finding_list_init(crimp_finding_list *list);
 
-/* `description` is copied (the list owns its own storage) — safe to pass a
- * stack buffer or free your own copy right after this call. `detector_name`
- * is stored as-is; pass a string literal. */
+/* Both `detector_name` and `description` are copied (the list owns its own
+ * storage) — safe to pass a stack buffer, a string literal, or a heap
+ * string you free right after this call either way. Copying
+ * `detector_name` too (not just `description`) matters now that a caller
+ * can be a runtime-loaded YAML rule's own `id` (crimp_yaml_rules.c) rather
+ * than always a compiled-in string literal — an un-copied pointer would
+ * dangle once the rule that produced it is freed, the same class of
+ * caller-side-invariant mistake this project has already been burned by
+ * once (see crimp_fs_path_component_is_safe's history). */
 void crimp_finding_list_add(crimp_finding_list *list, const char *detector_name,
                              const char *description, crimp_severity severity);
 void crimp_finding_list_free(crimp_finding_list *list);

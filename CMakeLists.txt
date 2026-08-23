@@ -15,6 +15,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(UNICORN REQUIRED IMPORTED_TARGET unicorn)
 find_package(ZLIB REQUIRED)
 find_package(LibLZMA REQUIRED)
+find_package(yaml CONFIG REQUIRED)
 
 add_library(crimp STATIC
     src/core/finding.c
@@ -27,6 +28,7 @@ add_library(crimp STATIC
     src/core/component_identify.c
     src/core/sbom.c
     src/core/scan.c
+    src/core/yaml_rules.c
     src/extract/identify.c
     src/extract/fs_util.c
     src/extract/squashfs.c
@@ -36,7 +38,7 @@ add_library(crimp STATIC
     src/detectors/weak_crypto.c
 )
 target_include_directories(crimp PUBLIC include PRIVATE src)
-target_link_libraries(crimp PRIVATE ZLIB::ZLIB LibLZMA::LibLZMA)
+target_link_libraries(crimp PRIVATE ZLIB::ZLIB LibLZMA::LibLZMA yaml)
 
 add_executable(crimp_cli src/cli/main.c)
 target_link_libraries(crimp_cli PRIVATE crimp)
@@ -66,6 +68,10 @@ add_test(NAME sbom COMMAND test_sbom)
 add_executable(test_scan tests/core/test_scan.c)
 target_link_libraries(test_scan PRIVATE crimp)
 add_test(NAME scan COMMAND test_scan)
+
+add_executable(test_yaml_rules tests/core/test_yaml_rules.c)
+target_link_libraries(test_yaml_rules PRIVATE crimp)
+add_test(NAME yaml_rules COMMAND test_yaml_rules)
 
 add_executable(test_identify tests/extract/test_identify.c)
 target_link_libraries(test_identify PRIVATE crimp)

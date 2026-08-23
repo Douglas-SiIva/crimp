@@ -20,13 +20,14 @@ void crimp_finding_list_add(crimp_finding_list *list, const char *detector_name,
     }
 
     crimp_finding *f = &list->items[list->count++];
-    f->detector_name = detector_name; /* detector names are string literals, not owned */
+    f->detector_name = strdup(detector_name);
     f->description = strdup(description);
     f->severity = severity;
 }
 
 void crimp_finding_list_free(crimp_finding_list *list) {
     for (size_t i = 0; i < list->count; i++) {
+        free(list->items[i].detector_name);
         free(list->items[i].description);
     }
     free(list->items);

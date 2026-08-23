@@ -9,6 +9,7 @@
     },
     "unicorn",
     "zlib",
-    "liblzma"
+    "liblzma",
+    "libyaml"
   ]
 }
