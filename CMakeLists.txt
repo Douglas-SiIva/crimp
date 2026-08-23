@@ -69,6 +69,13 @@ add_executable(test_identify tests/extract/test_identify.c)
 target_link_libraries(test_identify PRIVATE crimp)
 add_test(NAME identify COMMAND test_identify)
 
+add_executable(test_fs_extract tests/extract/test_fs_extract.c)
+target_link_libraries(test_fs_extract PRIVATE crimp)
+target_compile_definitions(test_fs_extract PRIVATE
+    FIXTURE_WITH_BIGFILE="${CMAKE_SOURCE_DIR}/tests/fixtures/squashfs_extract.img"
+    FIXTURE_WITHOUT_BIGFILE="${CMAKE_SOURCE_DIR}/tests/fixtures/squashfs_uncompressed.img")
+add_test(NAME fs_extract COMMAND test_fs_extract)
+
 add_executable(test_squashfs_list tests/extract/test_squashfs_list.c)
 target_include_directories(test_squashfs_list PRIVATE src/extract)
 target_link_libraries(test_squashfs_list PRIVATE crimp)
