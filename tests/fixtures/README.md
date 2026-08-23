@@ -98,3 +98,38 @@ matching `unsquashfs -d`. Neither larger image is committed (too big for a
 fixture); regenerate ad hoc if you need to re-verify against something
 bigger than this toy tree. `bin/sh` (a symlink) is deliberately *not*
 extracted as a file — milestone 2b only extracts regular file content.
+
+## squashfs_xz.img
+
+Same tree/content as `squashfs_extract.img` above, but built with
+`-comp xz` instead of gzip (issue #7 milestone 3, xz decompression).
+Regenerate with:
+
+```sh
+mkdir -p /tmp/crimp_fixture_xz/etc /tmp/crimp_fixture_xz/bin/nested
+echo "hello=world" > /tmp/crimp_fixture_xz/etc/config.txt
+echo "root:x:0:0:root:/root:/bin/sh" > /tmp/crimp_fixture_xz/etc/passwd
+printf "FAKE_BUSYBOX_BINARY_CONTENT_1234567890" > /tmp/crimp_fixture_xz/bin/busybox
+printf "nested file content here" > /tmp/crimp_fixture_xz/bin/nested/deep.txt
+ln -s /bin/busybox /tmp/crimp_fixture_xz/bin/sh
+python3 -c "import sys; sys.stdout.buffer.write((b'0123456789' * 1100)[:11000])" \
+    > /tmp/crimp_fixture_xz/bin/bigfile.bin
+mksquashfs /tmp/crimp_fixture_xz squashfs_xz.img -comp xz -b 4096 -all-root -no-progress
+```
+
+Before landing, first confirmed the actual on-disk framing xz compression
+uses: built a real `mksquashfs -comp xz` image and inspected the raw bytes
+at `inode_table_start` directly — each compressed block starts with the full
+`.xz` container magic (`FD 37 7A 58 5A 00`), not a raw LZMA2 stream, which is
+why the decoder uses `lzma_stream_buffer_decode` (the full-container
+one-shot API), not a raw-filter one. Then validated the same way as
+`squashfs_gzip.img`/`squashfs_extract.img`: this fixture's content
+byte-for-byte identical to `unsquashfs -d` (sha256sum match), plus a much
+larger real-world image (a real `/usr/share/doc` tree via WSL, `-comp xz`,
+~9.4MB, 3370 inodes/2537 files/621 dirs/212 symlinks — same source tree
+already used to validate gzip) diffed both by file list (2537/2537 exact
+match) and by sha256 hash of every extracted file (2537/2537 exact match)
+against `unsquashfs -d`'s output. That large image isn't committed (too big
+for a fixture); regenerate ad hoc with `mksquashfs /usr/share/doc large.img
+-comp xz -all-root` if you need to re-verify against something bigger than
+this toy tree.

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <lzma.h>
 #include <zlib.h>
 
 #include <errno.h>
@@ -103,6 +104,7 @@ const char *crimp_squashfs_compression_name(uint16_t id) {
 typedef struct {
     FILE *f;
     uint64_t next_block_offset; /* absolute file offset of the next block's header */
+    uint16_t compression; /* superblock's compressor id - which decoder to use */
     uint8_t buf[METADATA_BLOCK_SIZE];
     uint16_t buf_len;
     uint16_t buf_pos;
@@ -120,21 +122,83 @@ static int cursor_fseek64(FILE *f, uint64_t offset) {
 #endif
 }
 
-/* SquashFS's "gzip" compressor (id 1, by far the most common in real
- * firmware alongside xz) is a raw zlib stream (RFC 1950 — zlib header +
- * adler32 trailer), not gzip-wrapped (RFC 1952) and not raw deflate
- * (RFC 1951) — confirmed against the kernel's squashfs zlib decompressor,
- * which uses zlib's default inflate init. zlib's single-shot uncompress()
- * expects exactly that framing, so it's a direct fit — no streaming state
- * needed since a metadata block's decompressed size is capped at 8KiB. */
-static int inflate_block(uint8_t *dest, uint16_t *dest_len, const uint8_t *src,
-                          uint16_t src_len) {
-    uLongf out_len = METADATA_BLOCK_SIZE;
-    if (uncompress(dest, &out_len, src, src_len) != Z_OK) {
-        return -1;
+/* liblzma bounds a single-shot xz decode's dictionary/working-memory
+ * allocation to this limit (LZMA_MEMLIMIT_ERROR if the stream's own header
+ * claims a dictionary bigger than it can service within that budget) -
+ * independent of dest_cap below, which only bounds *output* size. Without
+ * this, a crafted stream header claiming an oversized dictionary could
+ * still force a large allocation attempt during decode setup before ever
+ * producing (or being rejected for) too much output. 256MiB is generous for
+ * any legitimate squashfs use (block size, and therefore dictionary size,
+ * is already capped at MAX_SQUASHFS_BLOCK_SIZE = 1MiB) while bounding the
+ * worst case regardless of what a crafted image claims. */
+#define LZMA_DECODE_MEMLIMIT (256ull * 1024 * 1024)
+
+/* Shared decompressor for every compressed block this file reads (metadata
+ * blocks via the cursor below, and data/fragment blocks in
+ * read_and_inflate_block) - one dispatch point per supported `compression`
+ * id (the squashfs superblock's compressor field) instead of duplicating
+ * the same switch at every call site. `dest_cap` bounds how much output a
+ * malicious/corrupt stream can produce into `dest`; unsupported compressor
+ * ids fail cleanly (return -1) rather than misparsing, same as the existing
+ * "compressed blocks fail cleanly" behavior from before xz support existed. */
+static int decompress_block(uint16_t compression, uint8_t *dest, uint32_t dest_cap,
+                             uint32_t *dest_len, const uint8_t *src, uint32_t src_len) {
+    switch (compression) {
+        case 1: {
+            /* gzip (id 1): a raw zlib stream (RFC 1950 - zlib header +
+             * adler32 trailer), not gzip-wrapped (RFC 1952) and not raw
+             * deflate (RFC 1951) - confirmed against the kernel's squashfs
+             * zlib decompressor, which uses zlib's default inflate init.
+             * zlib's single-shot uncompress() expects exactly that framing. */
+            uLongf out_len = dest_cap;
+            if (uncompress(dest, &out_len, src, src_len) != Z_OK) {
+                return -1;
+            }
+            *dest_len = (uint32_t)out_len;
+            return 0;
+        }
+        case 4: {
+            /* xz (id 4): confirmed by building a real mksquashfs -comp xz
+             * image and inspecting the raw bytes at inode_table_start - each
+             * compressed block starts with the full .xz container magic
+             * (FD 37 7A 58 5A 00), not a raw LZMA2 stream, so this needs the
+             * full-container one-shot decoder (lzma_stream_buffer_decode),
+             * not a raw-filter API. */
+            uint64_t memlimit = LZMA_DECODE_MEMLIMIT;
+            size_t in_pos = 0;
+            size_t out_pos = 0;
+            lzma_ret rc = lzma_stream_buffer_decode(&memlimit, 0, NULL, src, &in_pos, src_len,
+                                                      dest, &out_pos, dest_cap);
+            if (rc != LZMA_OK) {
+                return -1;
+            }
+            /* lzma_stream_buffer_decode() without LZMA_CONCATENATED stops at
+             * the end of the first .xz stream and reports LZMA_OK even if
+             * `src` has trailing bytes past it (confirmed empirically: a
+             * valid stream + 20 garbage bytes appended still decodes with
+             * rc=LZMA_OK and in_pos left short of src_len) - every real
+             * mksquashfs block's declared size is exactly its compressed
+             * stream's length, so in_pos should always equal src_len for a
+             * genuine image. Rejecting a mismatch catches a crafted block
+             * whose declared size smuggles extra bytes past the real stream
+             * end, the same size-can't-be-trusted category of check this
+             * file already applies everywhere else (block_size, entry_count,
+             * file_size, ...). */
+            if (in_pos != src_len) {
+                return -1;
+            }
+            *dest_len = (uint32_t)out_pos;
+            return 0;
+        }
+        default:
+            /* lzma/lzo/lz4/zstd (ids 2/3/5/6): not implemented - real
+             * firmware overwhelmingly uses gzip or xz (see
+             * .claude/skills/squashfs-extraction/SKILL.md), and failing
+             * cleanly here is the same behavior compressed blocks already
+             * had before any decompressor existed. */
+            return -1;
     }
-    *dest_len = (uint16_t)out_len;
-    return 0;
 }
 
 static int cursor_load_next_block(metadata_cursor *c) {
@@ -164,11 +228,14 @@ static int cursor_load_next_block(metadata_cursor *c) {
             free(compressed_buf);
             return -1;
         }
-        int rc = inflate_block(c->buf, &c->buf_len, compressed_buf, size);
+        uint32_t out_len = 0;
+        int rc = decompress_block(c->compression, c->buf, sizeof(c->buf), &out_len,
+                                   compressed_buf, size);
         free(compressed_buf);
         if (rc != 0) {
             return -1;
         }
+        c->buf_len = (uint16_t)out_len;
     } else {
         if (fread(c->buf, 1, size, c->f) != size) {
             return -1;
@@ -182,9 +249,10 @@ static int cursor_load_next_block(metadata_cursor *c) {
 }
 
 static int cursor_init(metadata_cursor *c, FILE *f, uint64_t start_block_offset,
-                        uint16_t start_in_block_offset) {
+                        uint16_t start_in_block_offset, uint16_t compression) {
     c->f = f;
     c->next_block_offset = start_block_offset;
+    c->compression = compression;
     c->buf_len = 0;
     c->buf_pos = 0;
     if (cursor_load_next_block(c) != 0) {
@@ -417,10 +485,10 @@ static int read_symlink_fields(metadata_cursor *c, squashfs_inode *out) {
 }
 
 static int read_inode(FILE *f, uint64_t inode_table_start, uint64_t block_offset,
-                       uint16_t in_block_offset, uint64_t block_size, int want_content,
-                       squashfs_inode *out) {
+                       uint16_t in_block_offset, uint64_t block_size, uint16_t compression,
+                       int want_content, squashfs_inode *out) {
     metadata_cursor c;
-    if (cursor_init(&c, f, inode_table_start + block_offset, in_block_offset) != 0) {
+    if (cursor_init(&c, f, inode_table_start + block_offset, in_block_offset, compression) != 0) {
         return -1;
     }
 
@@ -666,7 +734,7 @@ static int read_fragment_entry(FILE *f, const squashfs_superblock *sb, uint32_t 
     }
 
     metadata_cursor c;
-    if (cursor_init(&c, f, meta_block_offset, (uint16_t)(entry_idx * 16)) != 0) {
+    if (cursor_init(&c, f, meta_block_offset, (uint16_t)(entry_idx * 16), sb->compression) != 0) {
         return -1;
     }
 
@@ -690,7 +758,8 @@ static int read_fragment_entry(FILE *f, const squashfs_superblock *sb, uint32_t 
  * `dest_cap`, always sb->block_size - the decompression-bomb cap) unless
  * `compressed` is false. */
 static int read_and_inflate_block(FILE *f, uint64_t offset, uint32_t size, int compressed,
-                                   uint8_t *dest, uint32_t dest_cap, uint32_t *dest_len) {
+                                   uint16_t compression, uint8_t *dest, uint32_t dest_cap,
+                                   uint32_t *dest_len) {
     if (size > dest_cap) {
         return -1;
     }
@@ -714,14 +783,9 @@ static int read_and_inflate_block(FILE *f, uint64_t offset, uint32_t size, int c
         free(compressed_buf);
         return -1;
     }
-    uLongf out_len = dest_cap;
-    int rc = uncompress(dest, &out_len, compressed_buf, size);
+    int rc = decompress_block(compression, dest, dest_cap, dest_len, compressed_buf, size);
     free(compressed_buf);
-    if (rc != Z_OK) {
-        return -1;
-    }
-    *dest_len = (uint32_t)out_len;
-    return 0;
+    return rc;
 }
 
 /* Writes one full data block (a "hole" if `raw`'s size is 0, otherwise
@@ -730,7 +794,8 @@ static int read_and_inflate_block(FILE *f, uint64_t offset, uint32_t size, int c
  * extract_regular_file()'s loop so that function needs only one `break` on
  * failure, not two. */
 static int write_data_block(FILE *f, FILE *out, uint64_t block_offset, uint32_t raw,
-                             uint64_t expected_len, uint8_t *block_buf, uint32_t block_size) {
+                             uint16_t compression, uint64_t expected_len, uint8_t *block_buf,
+                             uint32_t block_size) {
     uint32_t size = raw & 0xFFFFFFu;
     int compressed = (raw & (1u << 24)) == 0;
     uint32_t dest_len;
@@ -738,8 +803,8 @@ static int write_data_block(FILE *f, FILE *out, uint64_t block_offset, uint32_t 
         /* A hole (sparse block): file_size bytes of zero, nothing on disk. */
         memset(block_buf, 0, (size_t)expected_len);
         dest_len = (uint32_t)expected_len;
-    } else if (read_and_inflate_block(f, block_offset, size, compressed, block_buf, block_size,
-                                       &dest_len) != 0) {
+    } else if (read_and_inflate_block(f, block_offset, size, compressed, compression, block_buf,
+                                       block_size, &dest_len) != 0) {
         return -1;
     }
     /* SonarCloud's c:S2083 (path-injection taint rule) flags this write as
@@ -799,8 +864,8 @@ static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
             expected_len = inode->file_size - bytes_before;
         }
 
-        if (write_data_block(f, out, block_offset, inode->block_sizes[i], expected_len, block_buf,
-                              sb->block_size) != 0) {
+        if (write_data_block(f, out, block_offset, inode->block_sizes[i], sb->compression,
+                              expected_len, block_buf, sb->block_size) != 0) {
             ok = 0;
             break;
         }
@@ -816,8 +881,8 @@ static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
         uint32_t frag_dest_len = 0;
         if (read_fragment_entry(f, sb, inode->frag_index, &frag_start, &frag_size,
                                  &frag_compressed) != 0 ||
-            read_and_inflate_block(f, frag_start, frag_size, frag_compressed, block_buf,
-                                   sb->block_size, &frag_dest_len) != 0) {
+            read_and_inflate_block(f, frag_start, frag_size, frag_compressed, sb->compression,
+                                   block_buf, sb->block_size, &frag_dest_len) != 0) {
             ok = 0;
         } else if ((uint64_t)inode->frag_block_offset + tail_len > frag_dest_len) {
             ok = 0; /* fragment doesn't actually contain the claimed tail range */
@@ -966,7 +1031,7 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
     squashfs_inode child;
     int want_content = ctx->output_dir != NULL;
     if (read_inode(ctx->f, ctx->sb->inode_table_start, start, offset, ctx->sb->block_size,
-                    want_content, &child) != 0) {
+                    ctx->sb->compression, want_content, &child) != 0) {
         return -1;
     }
 
@@ -1035,7 +1100,7 @@ static int walk_directory(const walk_context *ctx, uint64_t dir_block_index,
 
     metadata_cursor c;
     if (cursor_init(&c, ctx->f, ctx->sb->directory_table_start + dir_block_index,
-                     dir_block_offset) != 0) {
+                     dir_block_offset, ctx->sb->compression) != 0) {
         return -1;
     }
 
@@ -1087,8 +1152,8 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
     uint16_t root_offset = (uint16_t)(sb.root_inode & 0xFFFF);
 
     squashfs_inode root;
-    if (read_inode(f, sb.inode_table_start, root_block, root_offset, sb.block_size, 0, &root) !=
-        0) {
+    if (read_inode(f, sb.inode_table_start, root_block, root_offset, sb.block_size, sb.compression,
+                    0, &root) != 0) {
         fclose(f);
         crimp_squashfs_entry_list_free(out);
         return -1;
@@ -1143,8 +1208,8 @@ int crimp_squashfs_extract(const char *path, const char *output_dir,
     uint16_t root_offset = (uint16_t)(sb.root_inode & 0xFFFF);
 
     squashfs_inode root;
-    if (read_inode(f, sb.inode_table_start, root_block, root_offset, sb.block_size, 0, &root) !=
-        0) {
+    if (read_inode(f, sb.inode_table_start, root_block, root_offset, sb.block_size, sb.compression,
+                    0, &root) != 0) {
         fclose(f);
         crimp_squashfs_entry_list_free(out);
         return -1;

@@ -8,6 +8,7 @@
       "features": ["arm", "arm64", "mips", "riscv", "x86"]
     },
     "unicorn",
-    "zlib"
+    "zlib",
+    "liblzma"
   ]
 }
