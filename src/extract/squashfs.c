@@ -907,18 +907,18 @@ static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
     return 0;
 }
 
-void crimp_squashfs_entry_list_init(crimp_squashfs_entry_list *list) {
+void crimp_fs_entry_list_init(crimp_fs_entry_list *list) {
     list->items = NULL;
     list->count = 0;
     list->capacity = 0;
 }
 
-static int entry_list_add(crimp_squashfs_entry_list *list, const char *path, int is_dir,
+static int entry_list_add(crimp_fs_entry_list *list, const char *path, int is_dir,
                            uint64_t size) {
     if (list->count == list->capacity) {
         size_t new_capacity = list->capacity == 0 ? 16 : list->capacity * 2;
-        crimp_squashfs_entry *items = (crimp_squashfs_entry *)realloc(
-            list->items, new_capacity * sizeof(crimp_squashfs_entry));
+        crimp_fs_entry *items = (crimp_fs_entry *)realloc(
+            list->items, new_capacity * sizeof(crimp_fs_entry));
         if (!items) {
             return -1;
         }
@@ -926,7 +926,7 @@ static int entry_list_add(crimp_squashfs_entry_list *list, const char *path, int
         list->capacity = new_capacity;
     }
 
-    crimp_squashfs_entry *e = &list->items[list->count];
+    crimp_fs_entry *e = &list->items[list->count];
     e->path = strdup(path);
     if (!e->path) {
         return -1;
@@ -937,7 +937,7 @@ static int entry_list_add(crimp_squashfs_entry_list *list, const char *path, int
     return 0;
 }
 
-void crimp_squashfs_entry_list_free(crimp_squashfs_entry_list *list) {
+void crimp_fs_entry_list_free(crimp_fs_entry_list *list) {
     for (size_t i = 0; i < list->count; i++) {
         free(list->items[i].path);
     }
@@ -958,7 +958,7 @@ void crimp_squashfs_entry_list_free(crimp_squashfs_entry_list *list) {
 typedef struct {
     FILE *f;
     const squashfs_superblock *sb;
-    crimp_squashfs_entry_list *out;
+    crimp_fs_entry_list *out;
     const char *output_dir; /* NULL for crimp_squashfs_list (listing only, no writes) */
 } walk_context;
 
@@ -1134,7 +1134,7 @@ static int walk_directory(const walk_context *ctx, uint64_t dir_block_index,
     return 0;
 }
 
-int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
+int crimp_squashfs_list(const char *path, crimp_fs_entry_list *out) {
     FILE *f = fopen(path, "rb");
     if (!f) {
         return -1;
@@ -1146,7 +1146,7 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
         return -1;
     }
 
-    crimp_squashfs_entry_list_init(out);
+    crimp_fs_entry_list_init(out);
 
     uint64_t root_block = sb.root_inode >> 16;
     uint16_t root_offset = (uint16_t)(sb.root_inode & 0xFFFF);
@@ -1155,7 +1155,7 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
     if (read_inode(f, sb.inode_table_start, root_block, root_offset, sb.block_size, sb.compression,
                     0, &root) != 0) {
         fclose(f);
-        crimp_squashfs_entry_list_free(out);
+        crimp_fs_entry_list_free(out);
         return -1;
     }
 
@@ -1164,7 +1164,7 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
                              0);
     fclose(f);
     if (rc != 0) {
-        crimp_squashfs_entry_list_free(out);
+        crimp_fs_entry_list_free(out);
         return -1;
     }
     return 0;
@@ -1177,13 +1177,13 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
  * plain mkdir here) - every path written beneath it comes from
  * path_component_is_safe()-checked entry names, so nothing can escape it. */
 int crimp_squashfs_extract(const char *path, const char *output_dir,
-                            crimp_squashfs_entry_list *out) {
+                            crimp_fs_entry_list *out) {
     /* Initialized before any failure path below, unlike crimp_squashfs_list
      * (whose fopen/read_superblock failures leave `out` untouched) - this
      * function's callers are extracting to disk on a code path that's more
      * naturally paired with "always free `out` when done", so make that
      * always safe rather than conditional on which check failed. */
-    crimp_squashfs_entry_list_init(out);
+    crimp_fs_entry_list_init(out);
 
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -1211,7 +1211,7 @@ int crimp_squashfs_extract(const char *path, const char *output_dir,
     if (read_inode(f, sb.inode_table_start, root_block, root_offset, sb.block_size, sb.compression,
                     0, &root) != 0) {
         fclose(f);
-        crimp_squashfs_entry_list_free(out);
+        crimp_fs_entry_list_free(out);
         return -1;
     }
 
@@ -1220,7 +1220,7 @@ int crimp_squashfs_extract(const char *path, const char *output_dir,
                              0);
     fclose(f);
     if (rc != 0) {
-        crimp_squashfs_entry_list_free(out);
+        crimp_fs_entry_list_free(out);
         return -1;
     }
     return 0;

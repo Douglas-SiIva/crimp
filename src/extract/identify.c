@@ -81,9 +81,9 @@ static void remove_tree(const char *path) {
 }
 
 static int extract_dispatch(const char *path, const char *dir) {
-    crimp_squashfs_entry_list list;
+    crimp_fs_entry_list list;
     if (crimp_squashfs_extract(path, dir, &list) == 0) {
-        crimp_squashfs_entry_list_free(&list);
+        crimp_fs_entry_list_free(&list);
         return 0;
     }
 

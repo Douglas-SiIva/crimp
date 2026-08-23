@@ -110,14 +110,14 @@ int main(void) {
              * parse (0, if the flipped byte didn't land somewhere that
              * changes structure). Reaching this line at all, for every one
              * of these variants, is the actual test: no crash, no hang. */
-            crimp_squashfs_entry_list list;
+            crimp_fs_entry_list list;
             if (crimp_squashfs_list(WORK_FILE, &list) == 0) {
-                crimp_squashfs_entry_list_free(&list);
+                crimp_fs_entry_list_free(&list);
             }
 
-            crimp_squashfs_entry_list extract_list;
+            crimp_fs_entry_list extract_list;
             if (crimp_squashfs_extract(WORK_FILE, OUTPUT_DIR, &extract_list) == 0) {
-                crimp_squashfs_entry_list_free(&extract_list);
+                crimp_fs_entry_list_free(&extract_list);
             }
 
             iterations++;

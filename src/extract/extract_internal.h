@@ -16,20 +16,20 @@ typedef struct {
     char *path; /* relative to the image root, e.g. "etc/passwd"; owned */
     int is_dir;
     uint64_t size; /* uncompressed size; 0 for directories */
-} crimp_squashfs_entry;
+} crimp_fs_entry;
 
 typedef struct {
-    crimp_squashfs_entry *items;
+    crimp_fs_entry *items;
     size_t count;
     size_t capacity;
-} crimp_squashfs_entry_list;
+} crimp_fs_entry_list;
 
-void crimp_squashfs_entry_list_init(crimp_squashfs_entry_list *list);
-void crimp_squashfs_entry_list_free(crimp_squashfs_entry_list *list);
+void crimp_fs_entry_list_init(crimp_fs_entry_list *list);
+void crimp_fs_entry_list_free(crimp_fs_entry_list *list);
 
 /* Returns 0 on success, -1 on a malformed image, an unsupported (compressed
  * metadata) image, or if `path` can't be read/isn't a SquashFS image. */
-int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out);
+int crimp_squashfs_list(const char *path, crimp_fs_entry_list *out);
 
 /* Issue #7 milestone 2b: extracts every regular file's real content under
  * `output_dir` (created if missing), mirroring the image's directory
@@ -38,6 +38,6 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out);
  * crafted image cannot write outside output_dir. Returns 0 on success, -1
  * on a malformed/unsupported image or if output_dir can't be created. */
 int crimp_squashfs_extract(const char *path, const char *output_dir,
-                            crimp_squashfs_entry_list *out);
+                            crimp_fs_entry_list *out);
 
 #endif /* CRIMP_EXTRACT_INTERNAL_H */

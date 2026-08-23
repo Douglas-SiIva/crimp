@@ -1127,10 +1127,10 @@ static int expect_list_fails(const char *label, int (*builder)(const char *), co
         fprintf(stderr, "FAIL: could not build %s fixture\n", label);
         return 1;
     }
-    crimp_squashfs_entry_list list;
+    crimp_fs_entry_list list;
     if (crimp_squashfs_list(path, &list) == 0) {
         fprintf(stderr, "FAIL: expected crimp_squashfs_list to reject %s\n", label);
-        crimp_squashfs_entry_list_free(&list);
+        crimp_fs_entry_list_free(&list);
         return 1;
     }
     return 0;
@@ -1142,12 +1142,12 @@ static int expect_list_succeeds(const char *label, int (*builder)(const char *),
         fprintf(stderr, "FAIL: could not build %s fixture\n", label);
         return 1;
     }
-    crimp_squashfs_entry_list list;
+    crimp_fs_entry_list list;
     if (crimp_squashfs_list(path, &list) != 0) {
         fprintf(stderr, "FAIL: expected crimp_squashfs_list to accept %s\n", label);
         return 1;
     }
-    crimp_squashfs_entry_list_free(&list);
+    crimp_fs_entry_list_free(&list);
     return 0;
 }
 
@@ -1158,7 +1158,7 @@ int main(void) {
         return 1;
     }
 
-    crimp_squashfs_entry_list list;
+    crimp_fs_entry_list list;
     if (crimp_squashfs_list(extended_path, &list) != 0) {
         fprintf(stderr, "FAIL: crimp_squashfs_list rejected a well-formed extended-types image\n");
         return 1;
@@ -1166,14 +1166,14 @@ int main(void) {
 
     int saw_ext_file = 0, saw_ext_dir = 0, saw_ext_link = 0, saw_dev = 0, saw_empty_dir = 0;
     for (size_t i = 0; i < list.count; i++) {
-        crimp_squashfs_entry *e = &list.items[i];
+        crimp_fs_entry *e = &list.items[i];
         if (strcmp(e->path, "ext_file") == 0 && !e->is_dir && e->size == 100) saw_ext_file = 1;
         if (strcmp(e->path, "ext_dir") == 0 && e->is_dir) saw_ext_dir = 1;
         if (strcmp(e->path, "ext_link") == 0 && !e->is_dir && e->size == 5) saw_ext_link = 1;
         if (strcmp(e->path, "ext_dir/dev") == 0 && !e->is_dir) saw_dev = 1;
         if (strcmp(e->path, "empty_dir") == 0 && e->is_dir) saw_empty_dir = 1;
     }
-    crimp_squashfs_entry_list_free(&list);
+    crimp_fs_entry_list_free(&list);
 
     if (!saw_ext_file || !saw_ext_dir || !saw_ext_link || !saw_dev || !saw_empty_dir) {
         fprintf(stderr,
@@ -1189,10 +1189,10 @@ int main(void) {
         fprintf(stderr, "FAIL: could not build compressed-block fixture\n");
         return 1;
     }
-    crimp_squashfs_entry_list compressed_list;
+    crimp_fs_entry_list compressed_list;
     if (crimp_squashfs_list(compressed_path, &compressed_list) == 0) {
         fprintf(stderr, "FAIL: expected crimp_squashfs_list to reject a compressed metadata block\n");
-        crimp_squashfs_entry_list_free(&compressed_list);
+        crimp_fs_entry_list_free(&compressed_list);
         return 1;
     }
 
@@ -1205,18 +1205,18 @@ int main(void) {
     }
     fputs("hsqs", tf); /* magic only, nowhere near a full superblock */
     fclose(tf);
-    crimp_squashfs_entry_list truncated_list;
+    crimp_fs_entry_list truncated_list;
     if (crimp_squashfs_list(truncated_path, &truncated_list) == 0) {
         fprintf(stderr, "FAIL: expected crimp_squashfs_list to reject a truncated file\n");
-        crimp_squashfs_entry_list_free(&truncated_list);
+        crimp_fs_entry_list_free(&truncated_list);
         return 1;
     }
 
     /* Missing file entirely. */
-    crimp_squashfs_entry_list missing_list;
+    crimp_fs_entry_list missing_list;
     if (crimp_squashfs_list("test_fixture_squashfs_does_not_exist.img", &missing_list) == 0) {
         fprintf(stderr, "FAIL: expected crimp_squashfs_list to reject a missing file\n");
-        crimp_squashfs_entry_list_free(&missing_list);
+        crimp_fs_entry_list_free(&missing_list);
         return 1;
     }
 
@@ -1282,20 +1282,20 @@ int main(void) {
         fprintf(stderr, "FAIL: could not build type-confusion fixture\n");
         return 1;
     }
-    crimp_squashfs_entry_list confusion_list;
+    crimp_fs_entry_list confusion_list;
     if (crimp_squashfs_list(confusion_path, &confusion_list) != 0) {
         fprintf(stderr, "FAIL: crimp_squashfs_list rejected the type-confusion fixture\n");
         return 1;
     }
     int saw_sneaky_dir = 0, saw_hidden_child = 0;
     for (size_t i = 0; i < confusion_list.count; i++) {
-        crimp_squashfs_entry *e = &confusion_list.items[i];
+        crimp_fs_entry *e = &confusion_list.items[i];
         if (strcmp(e->path, "sneaky") == 0 && e->is_dir) saw_sneaky_dir = 1;
         if (strcmp(e->path, "sneaky/hidden_child") == 0 && !e->is_dir && e->size == 42) {
             saw_hidden_child = 1;
         }
     }
-    crimp_squashfs_entry_list_free(&confusion_list);
+    crimp_fs_entry_list_free(&confusion_list);
     if (!saw_sneaky_dir || !saw_hidden_child) {
         fprintf(stderr,
                 "FAIL: a directory entry lying about its type (file) hid a real subdirectory "

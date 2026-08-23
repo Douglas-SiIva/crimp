@@ -68,12 +68,12 @@ static int check_file(const char *rel_path, const void *expected, size_t expecte
 }
 
 int main(void) {
-    crimp_squashfs_entry_list list;
+    crimp_fs_entry_list list;
     if (crimp_squashfs_extract(FIXTURE_PATH, OUTPUT_DIR, &list) != 0) {
         fprintf(stderr, "FAIL: crimp_squashfs_extract failed on %s\n", FIXTURE_PATH);
         return 1;
     }
-    crimp_squashfs_entry_list_free(&list);
+    crimp_fs_entry_list_free(&list);
 
     int ok = 1;
     ok &= check_file("etc/config.txt", EXPECTED_CONFIG, sizeof(EXPECTED_CONFIG) - 1);
