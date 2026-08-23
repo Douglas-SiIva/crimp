@@ -10,6 +10,7 @@ extern "C" {
 typedef enum {
     CRIMP_FS_UNKNOWN = 0,
     CRIMP_FS_SQUASHFS,
+    CRIMP_FS_CRAMFS,
 } crimp_fs_type;
 
 typedef struct {

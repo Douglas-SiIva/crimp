@@ -13,8 +13,11 @@ int crimp_fs_identify(const char *path, crimp_fs_info *out) {
     if (crimp_squashfs_identify(path, out) == 0) {
         return 0;
     }
+    if (crimp_cramfs_identify(path, out) == 0) {
+        return 0;
+    }
 
-    /* JFFS2 (#8) and cramfs (#9) go here once implemented. */
+    /* JFFS2 (#8) goes here once implemented. */
 
     return -1;
 }
@@ -22,6 +25,9 @@ int crimp_fs_identify(const char *path, crimp_fs_info *out) {
 const char *crimp_fs_compression_name(crimp_fs_type type, uint16_t compression) {
     if (type == CRIMP_FS_SQUASHFS) {
         return crimp_squashfs_compression_name(compression);
+    }
+    if (type == CRIMP_FS_CRAMFS) {
+        return crimp_cramfs_compression_name();
     }
     return "unknown";
 }
@@ -81,13 +87,17 @@ static void remove_tree(const char *path) {
 }
 
 static int extract_dispatch(const char *path, const char *dir) {
-    crimp_squashfs_entry_list list;
+    crimp_fs_entry_list list;
     if (crimp_squashfs_extract(path, dir, &list) == 0) {
-        crimp_squashfs_entry_list_free(&list);
+        crimp_fs_entry_list_free(&list);
+        return 0;
+    }
+    if (crimp_cramfs_extract(path, dir, &list) == 0) {
+        crimp_fs_entry_list_free(&list);
         return 0;
     }
 
-    /* JFFS2 (#8) and cramfs (#9) go here once implemented. */
+    /* JFFS2 (#8) goes here once implemented. */
 
     return -1;
 }

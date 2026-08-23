@@ -20,18 +20,12 @@
 #error "OUTPUT_DIR must be defined by the build (see CMakeLists.txt)"
 #endif
 
-/* Deterministic mutation sweep over a real, valid SquashFS fixture: every
- * byte offset is set to 0x00 and to 0xFF in turn, and each resulting
- * (almost always malformed) image is run through both public entry points.
- * This isn't a correctness test - nothing about a mutated image's expected
- * output is known - it's a crash-safety and coverage sweep, deliberately
- * reproducible (no RNG/seed) so CI sees the same result every run, unlike
- * this session's ad hoc randomized fuzzing (150k+ iterations, 0 crashes,
- * not part of the committed suite). Every single-byte corruption of a
- * feature-rich fixture (multi-block file, shared fragment, nested dirs)
- * exercises a wide spread of the parser's defensive "malformed input"
- * branches that a hand-written fixture per branch would take dozens of
- * files to reach individually. */
+/* Deterministic mutation sweep over a real, valid cramfs fixture - same
+ * approach and rationale as test_squashfs_mutation_sweep.c: every byte
+ * offset is set to 0x00 and to 0xFF in turn, each resulting (almost always
+ * malformed) image run through both public entry points. Not a correctness
+ * test - a crash-safety and coverage sweep, deliberately reproducible so CI
+ * sees the same result every run. */
 
 static unsigned char *read_whole_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
@@ -105,18 +99,16 @@ int main(void) {
             fwrite(mutated, 1, len, out);
             fclose(out);
 
-            /* Neither call's return value is checked - a mutated image is
-             * expected to often be rejected (-1) and occasionally still
-             * parse (0, if the flipped byte didn't land somewhere that
-             * changes structure). Reaching this line at all, for every one
-             * of these variants, is the actual test: no crash, no hang. */
+            /* Neither call's return value is checked - reaching this line
+             * at all, for every one of these variants, is the actual test:
+             * no crash, no hang. */
             crimp_fs_entry_list list;
-            if (crimp_squashfs_list(WORK_FILE, &list) == 0) {
+            if (crimp_cramfs_list(WORK_FILE, &list) == 0) {
                 crimp_fs_entry_list_free(&list);
             }
 
             crimp_fs_entry_list extract_list;
-            if (crimp_squashfs_extract(WORK_FILE, OUTPUT_DIR, &extract_list) == 0) {
+            if (crimp_cramfs_extract(WORK_FILE, OUTPUT_DIR, &extract_list) == 0) {
                 crimp_fs_entry_list_free(&extract_list);
             }
 
@@ -127,8 +119,8 @@ int main(void) {
     free(mutated);
     free(original);
 
-    printf("PASS: %ld single-byte mutations of %s survived crimp_squashfs_list + "
-           "crimp_squashfs_extract without crashing\n",
+    printf("PASS: %ld single-byte mutations of %s survived crimp_cramfs_list + "
+           "crimp_cramfs_extract without crashing\n",
            iterations, FIXTURE_PATH);
     return 0;
 }

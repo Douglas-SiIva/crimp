@@ -1,4 +1,5 @@
 #include "extract_internal.h"
+#include "fs_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,14 +7,6 @@
 #include <sys/types.h>
 #include <lzma.h>
 #include <zlib.h>
-
-#include <errno.h>
-#if defined(_WIN32)
-#include <direct.h>
-#include <windows.h>
-#else
-#include <sys/stat.h>
-#endif
 
 #pragma pack(push, 1)
 typedef struct {
@@ -110,18 +103,6 @@ typedef struct {
     uint16_t buf_pos;
 } metadata_cursor;
 
-/* fseek() takes a `long` offset, which is only 32 bits under the LLP64
- * model MinGW targets on Windows (this project's documented Windows build,
- * per CLAUDE.md) — casting a 64-bit table offset into that truncates
- * silently for offsets past ~2GB. Use the platform's real 64-bit seek. */
-static int cursor_fseek64(FILE *f, uint64_t offset) {
-#if defined(_WIN32)
-    return _fseeki64(f, (long long)offset, SEEK_SET);
-#else
-    return fseeko(f, (off_t)offset, SEEK_SET);
-#endif
-}
-
 /* liblzma bounds a single-shot xz decode's dictionary/working-memory
  * allocation to this limit (LZMA_MEMLIMIT_ERROR if the stream's own header
  * claims a dictionary bigger than it can service within that budget) -
@@ -203,7 +184,7 @@ static int decompress_block(uint16_t compression, uint8_t *dest, uint32_t dest_c
 
 static int cursor_load_next_block(metadata_cursor *c) {
     uint16_t hdr;
-    if (cursor_fseek64(c->f, c->next_block_offset) != 0) {
+    if (crimp_fs_seek64(c->f, c->next_block_offset) != 0) {
         return -1;
     }
     if (fread(&hdr, sizeof(hdr), 1, c->f) != 1) {
@@ -562,153 +543,6 @@ static int validate_block_size(uint32_t block_size) {
     return 0;
 }
 
-/* Windows reserves these as device names regardless of extension or case
- * ("con", "CON", "con.txt" are all the console device, not a creatable
- * file) - a real hazard here since this project's documented build target
- * is Windows/MinGW, and an image built on Linux (where these are ordinary
- * filenames) can carry one without anything else being wrong with it. */
-static const char *const WINDOWS_RESERVED_NAMES[] = {
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5",
-    "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
-    "lpt6", "lpt7", "lpt8", "lpt9",
-};
-#define WINDOWS_RESERVED_NAME_COUNT \
-    (sizeof(WINDOWS_RESERVED_NAMES) / sizeof(WINDOWS_RESERVED_NAMES[0]))
-
-static int is_windows_reserved_name(const char *name, size_t len) {
-    size_t base_len = 0;
-    while (base_len < len && name[base_len] != '.') {
-        base_len++;
-    }
-    if (base_len == 0 || base_len > 4) {
-        return 0; /* every reserved name's base is 3-4 chars */
-    }
-    for (size_t r = 0; r < WINDOWS_RESERVED_NAME_COUNT; r++) {
-        const char *reserved = WINDOWS_RESERVED_NAMES[r];
-        if (strlen(reserved) != base_len) {
-            continue;
-        }
-        int match = 1;
-        for (size_t i = 0; i < base_len; i++) {
-            char c = name[i];
-            if (c >= 'A' && c <= 'Z') {
-                c = (char)(c - 'A' + 'a');
-            }
-            if (c != reserved[i]) {
-                match = 0;
-                break;
-            }
-        }
-        if (match) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/* A directory-table entry name is untrusted. Reject anything that could
- * turn "output_dir + name" into a path escaping output_dir once joined
- * (".", "..", any embedded path separator - both "/" and "\\", since a
- * name crafted on one platform must not escape when Crimp runs on the
- * other - or drive-letter colon), anything that would silently truncate
- * once C-string functions touch it (an embedded NUL byte - name_len is
- * trusted for bounds-checking raw bytes, but %s/strlen stop at the first
- * NUL regardless, so two differently-named entries could collide onto the
- * same disk path), or a Windows-reserved device name. Real mksquashfs
- * never produces any of these, so this can't reject legitimate images -
- * only crafted (or, for the device-name case, merely unlucky) ones. */
-static int path_component_is_safe(const char *name, size_t len) {
-    /* len is always >= 1 here: the caller computes it as
-     * (uint32_t)name_size + 1 (off-by-one encoded) *without* truncating
-     * back to uint16_t first - a name_size of 0xFFFF must become 65536,
-     * not wrap to 0, precisely so this can't be bypassed by an empty
-     * name. See process_dir_entry(), which also caps it at 256 before
-     * calling here. */
-    if (len == 1 && name[0] == '.') {
-        return 0;
-    }
-    if (len == 2 && name[0] == '.' && name[1] == '.') {
-        return 0;
-    }
-    for (size_t i = 0; i < len; i++) {
-        char c = name[i];
-        if (c == '/' || c == '\\' || c == ':' || c == '\0') {
-            return 0;
-        }
-    }
-    if (is_windows_reserved_name(name, len)) {
-        return 0;
-    }
-    return 1;
-}
-
-/* Returns 1 if `path` exists and is *itself* a real directory, 0
- * otherwise (including on stat failure or if it's a symlink/junction -
- * deliberately not followed, even one pointing at a real directory: a
- * symlink planted at this path before extraction started must not be
- * mistaken for "already the directory we wanted", or files meant for
- * output_dir would be written through it instead). */
-static int path_is_existing_directory(const char *path) {
-#if defined(_WIN32)
-    DWORD attrs = GetFileAttributesA(path);
-    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-           (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-#else
-    struct stat st;
-    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
-#endif
-}
-
-/* Returns 1 if `path` already exists and is a symlink (POSIX) or reparse
- * point (Windows - junctions and symlinks both set this flag), 0 otherwise.
- * Neither branch follows the link to check what it points to - the point
- * is to detect its presence without ever opening through it. */
-static int path_is_symlink(const char *path) {
-#if defined(_WIN32)
-    DWORD attrs = GetFileAttributesA(path);
-    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-#else
-    struct stat st;
-    return lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
-#endif
-}
-
-/* mkdir() reporting EEXIST only means *something* is already there - not
- * necessarily a directory. Without checking, a stale regular file left at
- * this path (e.g. from a previous extraction run into the same output_dir)
- * would make this report success while the walk still believes it can
- * recurse into a real directory, turning every child underneath into a
- * confusing failure far from the actual cause. */
-static int make_directory(const char *path) {
-#if defined(_WIN32)
-    if (_mkdir(path) == 0) {
-        return 0;
-    }
-    return (errno == EEXIST && path_is_existing_directory(path)) ? 0 : -1;
-#else
-    /* Owner-only: extracted firmware content can legitimately contain
-     * secrets (private keys, credentials - the exact things this tool's
-     * own detectors look for), so the extraction tree shouldn't be
-     * world-readable by default. */
-    if (mkdir(path, 0700) == 0) {
-        return 0;
-    }
-    return (errno == EEXIST && path_is_existing_directory(path)) ? 0 : -1;
-#endif
-}
-
-/* Joins output_dir and rel_path, rejecting (rather than silently
- * truncating) anything that doesn't fit - a truncated path could resolve
- * to somewhere unintended just as easily as a traversal could. */
-static int join_output_path(const char *output_dir, const char *rel_path, char *out,
-                             size_t out_cap) {
-    int n = snprintf(out, out_cap, "%s/%s", output_dir, rel_path);
-    if (n < 0 || (size_t)n >= out_cap) {
-        return -1;
-    }
-    return 0;
-}
-
 /* Fragment table: a raw (uncompressed) array of u64 metadata-block offsets
  * at fragment_table_start, one per 512 fragment entries; each such block
  * holds up to 512 16-byte entries (start u64, size u32 with bit 24 marking
@@ -725,7 +559,7 @@ static int read_fragment_entry(FILE *f, const squashfs_superblock *sb, uint32_t 
     uint32_t entry_idx = frag_index % FRAGMENTS_PER_METADATA_BLOCK;
 
     uint64_t lookup_offset = sb->fragment_table_start + (uint64_t)block_idx * 8;
-    if (cursor_fseek64(f, lookup_offset) != 0) {
+    if (crimp_fs_seek64(f, lookup_offset) != 0) {
         return -1;
     }
     uint64_t meta_block_offset;
@@ -763,7 +597,7 @@ static int read_and_inflate_block(FILE *f, uint64_t offset, uint32_t size, int c
     if (size > dest_cap) {
         return -1;
     }
-    if (cursor_fseek64(f, offset) != 0) {
+    if (crimp_fs_seek64(f, offset) != 0) {
         return -1;
     }
 
@@ -809,7 +643,7 @@ static int write_data_block(FILE *f, FILE *out, uint64_t block_offset, uint32_t 
     }
     /* SonarCloud's c:S2083 (path-injection taint rule) flags this write as
      * a "tainted value leaking" - its dataflow engine doesn't recognize
-     * path_component_is_safe() + join_output_path() (this file's actual
+     * crimp_fs_path_component_is_safe() + crimp_fs_join_output_path() (this file's actual
      * sanitization, applied before `out`'s path was ever built) as a
      * taint-clearing boundary, so it still treats `out` as carrying
      * untrusted path influence here. That sanitization was verified against
@@ -832,9 +666,9 @@ static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
      * before extraction started (e.g. output_dir reused across runs, or
      * otherwise not fully attacker-free) would make it write through the
      * link instead of creating a real file here, escaping the containment
-     * path_component_is_safe() and join_output_path() otherwise guarantee.
+     * crimp_fs_path_component_is_safe() and crimp_fs_join_output_path() otherwise guarantee.
      * Refuse outright rather than follow it. */
-    if (path_is_symlink(disk_path)) {
+    if (crimp_fs_path_is_symlink(disk_path)) {
         return -1;
     }
     FILE *out = fopen(disk_path, "wb");
@@ -907,45 +741,6 @@ static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
     return 0;
 }
 
-void crimp_squashfs_entry_list_init(crimp_squashfs_entry_list *list) {
-    list->items = NULL;
-    list->count = 0;
-    list->capacity = 0;
-}
-
-static int entry_list_add(crimp_squashfs_entry_list *list, const char *path, int is_dir,
-                           uint64_t size) {
-    if (list->count == list->capacity) {
-        size_t new_capacity = list->capacity == 0 ? 16 : list->capacity * 2;
-        crimp_squashfs_entry *items = (crimp_squashfs_entry *)realloc(
-            list->items, new_capacity * sizeof(crimp_squashfs_entry));
-        if (!items) {
-            return -1;
-        }
-        list->items = items;
-        list->capacity = new_capacity;
-    }
-
-    crimp_squashfs_entry *e = &list->items[list->count];
-    e->path = strdup(path);
-    if (!e->path) {
-        return -1;
-    }
-    e->is_dir = is_dir;
-    e->size = size;
-    list->count++;
-    return 0;
-}
-
-void crimp_squashfs_entry_list_free(crimp_squashfs_entry_list *list) {
-    for (size_t i = 0; i < list->count; i++) {
-        free(list->items[i].path);
-    }
-    free(list->items);
-    list->items = NULL;
-    list->count = 0;
-    list->capacity = 0;
-}
 
 /* MAX_DIR_DEPTH's rationale is documented on walk_directory below, next to
  * the code that actually enforces it. */
@@ -958,7 +753,7 @@ void crimp_squashfs_entry_list_free(crimp_squashfs_entry_list *list) {
 typedef struct {
     FILE *f;
     const squashfs_superblock *sb;
-    crimp_squashfs_entry_list *out;
+    crimp_fs_entry_list *out;
     const char *output_dir; /* NULL for crimp_squashfs_list (listing only, no writes) */
 } walk_context;
 
@@ -991,7 +786,7 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
     /* Widened to uint32_t deliberately: name_size is a full uint16_t
      * (0-65535), so name_size + 1 can reach 65536 - computing this in
      * uint16_t would wrap 0xFFFF + 1 back to 0, producing an empty name
-     * that sails past both checks below and past path_component_is_safe()
+     * that sails past both checks below and past crimp_fs_path_component_is_safe()
      * itself. A crafted image can and does set name_size to 0xFFFF. */
     uint32_t name_len = (uint32_t)name_size + 1;
     if (*remaining < name_len || name_len > 256) {
@@ -1009,7 +804,7 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
      * during extraction. Enforced for listing too, not just extraction -
      * a real image never has such a name, so this only ever rejects
      * malformed/adversarial ones. */
-    if (!path_component_is_safe(name, name_len)) {
+    if (!crimp_fs_path_component_is_safe(name, name_len)) {
         return -1;
     }
 
@@ -1021,8 +816,9 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
         child_path_len = snprintf(child_path, sizeof(child_path), "%s/%s", parent_path, name);
     }
     /* A silently truncated path is exactly as unsafe as a traversal - it
-     * could collide with an unrelated, shorter path (see join_output_path's
-     * same reasoning below). Deep enough trees with long enough names can
+     * could collide with an unrelated, shorter path (see
+     * crimp_fs_join_output_path's same reasoning, fs_util.c). Deep enough
+     * trees with long enough names can
      * genuinely overflow this buffer; reject rather than guess. */
     if (child_path_len < 0 || (size_t)child_path_len >= sizeof(child_path)) {
         return -1;
@@ -1043,7 +839,7 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
      * credentials, exposed protocols, whatever else) from every
      * downstream detector. */
     int is_dir = (child.type == 1 || child.type == 8);
-    if (entry_list_add(ctx->out, child_path, is_dir, is_dir ? 0 : child.file_size) != 0) {
+    if (crimp_fs_entry_list_add(ctx->out, child_path, is_dir, is_dir ? 0 : child.file_size) != 0) {
         squashfs_inode_free(&child);
         return -1;
     }
@@ -1051,10 +847,10 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
     int rc = 0;
     if (ctx->output_dir != NULL) {
         char disk_path[1280];
-        if (join_output_path(ctx->output_dir, child_path, disk_path, sizeof(disk_path)) != 0) {
+        if (crimp_fs_join_output_path(ctx->output_dir, child_path, disk_path, sizeof(disk_path)) != 0) {
             rc = -1;
         } else if (is_dir) {
-            rc = make_directory(disk_path);
+            rc = crimp_fs_make_directory(disk_path);
         } else if (child.type == 2 || child.type == 9) {
             rc = extract_regular_file(ctx->f, ctx->sb, &child, disk_path);
         }
@@ -1134,7 +930,7 @@ static int walk_directory(const walk_context *ctx, uint64_t dir_block_index,
     return 0;
 }
 
-int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
+int crimp_squashfs_list(const char *path, crimp_fs_entry_list *out) {
     FILE *f = fopen(path, "rb");
     if (!f) {
         return -1;
@@ -1146,7 +942,7 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
         return -1;
     }
 
-    crimp_squashfs_entry_list_init(out);
+    crimp_fs_entry_list_init(out);
 
     uint64_t root_block = sb.root_inode >> 16;
     uint16_t root_offset = (uint16_t)(sb.root_inode & 0xFFFF);
@@ -1155,7 +951,7 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
     if (read_inode(f, sb.inode_table_start, root_block, root_offset, sb.block_size, sb.compression,
                     0, &root) != 0) {
         fclose(f);
-        crimp_squashfs_entry_list_free(out);
+        crimp_fs_entry_list_free(out);
         return -1;
     }
 
@@ -1164,7 +960,7 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
                              0);
     fclose(f);
     if (rc != 0) {
-        crimp_squashfs_entry_list_free(out);
+        crimp_fs_entry_list_free(out);
         return -1;
     }
     return 0;
@@ -1175,15 +971,15 @@ int crimp_squashfs_list(const char *path, crimp_squashfs_entry_list *out) {
  * the image's directory structure, and creates directories as needed.
  * output_dir must already exist (created by the caller, or by us as a
  * plain mkdir here) - every path written beneath it comes from
- * path_component_is_safe()-checked entry names, so nothing can escape it. */
+ * crimp_fs_path_component_is_safe()-checked entry names, so nothing can escape it. */
 int crimp_squashfs_extract(const char *path, const char *output_dir,
-                            crimp_squashfs_entry_list *out) {
+                            crimp_fs_entry_list *out) {
     /* Initialized before any failure path below, unlike crimp_squashfs_list
      * (whose fopen/read_superblock failures leave `out` untouched) - this
      * function's callers are extracting to disk on a code path that's more
      * naturally paired with "always free `out` when done", so make that
      * always safe rather than conditional on which check failed. */
-    crimp_squashfs_entry_list_init(out);
+    crimp_fs_entry_list_init(out);
 
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -1199,7 +995,7 @@ int crimp_squashfs_extract(const char *path, const char *output_dir,
         fclose(f);
         return -1;
     }
-    if (make_directory(output_dir) != 0) {
+    if (crimp_fs_make_directory(output_dir) != 0) {
         fclose(f);
         return -1;
     }
@@ -1211,7 +1007,7 @@ int crimp_squashfs_extract(const char *path, const char *output_dir,
     if (read_inode(f, sb.inode_table_start, root_block, root_offset, sb.block_size, sb.compression,
                     0, &root) != 0) {
         fclose(f);
-        crimp_squashfs_entry_list_free(out);
+        crimp_fs_entry_list_free(out);
         return -1;
     }
 
@@ -1220,7 +1016,7 @@ int crimp_squashfs_extract(const char *path, const char *output_dir,
                              0);
     fclose(f);
     if (rc != 0) {
-        crimp_squashfs_entry_list_free(out);
+        crimp_fs_entry_list_free(out);
         return -1;
     }
     return 0;

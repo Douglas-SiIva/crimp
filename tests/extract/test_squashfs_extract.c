@@ -549,12 +549,12 @@ static int make_test_directory(const char *path) {
 }
 
 int main(void) {
-    crimp_squashfs_entry_list list;
+    crimp_fs_entry_list list;
     if (crimp_squashfs_extract(FIXTURE_PATH, OUTPUT_DIR, &list) != 0) {
         fprintf(stderr, "FAIL: crimp_squashfs_extract failed on %s\n", FIXTURE_PATH);
         return 1;
     }
-    crimp_squashfs_entry_list_free(&list);
+    crimp_fs_entry_list_free(&list);
 
     int ok = 1;
     ok &= check_file("etc/config.txt", EXPECTED_CONFIG, sizeof(EXPECTED_CONFIG) - 1);
@@ -597,11 +597,11 @@ int main(void) {
     }
     const char *corrupt_out_dir = "squashfs_extract_corrupt_output";
     make_test_directory(corrupt_out_dir); /* ignore EEXIST - fine either way */
-    crimp_squashfs_entry_list corrupt_list;
+    crimp_fs_entry_list corrupt_list;
     int corrupt_rc = crimp_squashfs_extract(corrupt_path, corrupt_out_dir, &corrupt_list);
     if (corrupt_rc == 0) {
         fprintf(stderr, "FAIL: expected crimp_squashfs_extract to fail on a corrupt data block\n");
-        crimp_squashfs_entry_list_free(&corrupt_list);
+        crimp_fs_entry_list_free(&corrupt_list);
         return 1;
     }
     char corrupt_file_path[1024];
@@ -636,13 +636,13 @@ int main(void) {
     }
     fputs("not a directory", stale);
     fclose(stale);
-    crimp_squashfs_entry_list collision_list;
+    crimp_fs_entry_list collision_list;
     int collision_rc = crimp_squashfs_extract(empty_dir_path, collision_out_dir, &collision_list);
     if (collision_rc == 0) {
         fprintf(stderr,
                 "FAIL: expected crimp_squashfs_extract to fail when 'emptydir' already exists as "
                 "a regular file, not a directory\n");
-        crimp_squashfs_entry_list_free(&collision_list);
+        crimp_fs_entry_list_free(&collision_list);
         return 1;
     }
 
@@ -653,21 +653,21 @@ int main(void) {
         return 1;
     }
     const char *tiny_block_out_dir = "squashfs_extract_tiny_block_output";
-    crimp_squashfs_entry_list tiny_block_list;
+    crimp_fs_entry_list tiny_block_list;
     if (crimp_squashfs_extract(tiny_block_path, tiny_block_out_dir, &tiny_block_list) == 0) {
         fprintf(stderr,
                 "FAIL: expected crimp_squashfs_extract to reject a block_size below the spec "
                 "minimum\n");
-        crimp_squashfs_entry_list_free(&tiny_block_list);
+        crimp_fs_entry_list_free(&tiny_block_list);
         return 1;
     }
 
     /* A missing image file must be rejected at the initial fopen(). */
-    crimp_squashfs_entry_list missing_list;
+    crimp_fs_entry_list missing_list;
     if (crimp_squashfs_extract("test_fixture_squashfs_does_not_exist.img", "squashfs_extract_missing_output",
                                 &missing_list) == 0) {
         fprintf(stderr, "FAIL: expected crimp_squashfs_extract to reject a missing image file\n");
-        crimp_squashfs_entry_list_free(&missing_list);
+        crimp_fs_entry_list_free(&missing_list);
         return 1;
     }
 
@@ -683,13 +683,13 @@ int main(void) {
     }
     fputs("not a directory either", stale_output);
     fclose(stale_output);
-    crimp_squashfs_entry_list output_collision_list;
+    crimp_fs_entry_list output_collision_list;
     if (crimp_squashfs_extract(FIXTURE_PATH, output_collision_path, &output_collision_list) == 0) {
         fprintf(stderr,
                 "FAIL: expected crimp_squashfs_extract to reject output_dir '%s' already "
                 "existing as a regular file\n",
                 output_collision_path);
-        crimp_squashfs_entry_list_free(&output_collision_list);
+        crimp_fs_entry_list_free(&output_collision_list);
         return 1;
     }
 
@@ -702,12 +702,12 @@ int main(void) {
         return 1;
     }
     const char *uncompressed_out_dir = "squashfs_extract_uncompressed_output";
-    crimp_squashfs_entry_list uncompressed_list;
+    crimp_fs_entry_list uncompressed_list;
     if (crimp_squashfs_extract(uncompressed_path, uncompressed_out_dir, &uncompressed_list) != 0) {
         fprintf(stderr, "FAIL: crimp_squashfs_extract failed on an uncompressed-block image\n");
         return 1;
     }
-    crimp_squashfs_entry_list_free(&uncompressed_list);
+    crimp_fs_entry_list_free(&uncompressed_list);
     unsigned char expected_raw[4096];
     for (size_t i = 0; i < sizeof(expected_raw); i++) {
         expected_raw[i] = (unsigned char)(i % 251);
@@ -732,12 +732,12 @@ int main(void) {
         return 1;
     }
     const char *huge_size_out_dir = "squashfs_extract_huge_size_output";
-    crimp_squashfs_entry_list huge_size_list;
+    crimp_fs_entry_list huge_size_list;
     if (crimp_squashfs_extract(huge_size_path, huge_size_out_dir, &huge_size_list) == 0) {
         fprintf(stderr,
                 "FAIL: expected crimp_squashfs_extract to reject file_size=UINT64_MAX with no "
                 "fragment (block-count overflow)\n");
-        crimp_squashfs_entry_list_free(&huge_size_list);
+        crimp_fs_entry_list_free(&huge_size_list);
         return 1;
     }
 
@@ -752,12 +752,12 @@ int main(void) {
         return 1;
     }
     const char *oversized_out_dir = "squashfs_extract_oversized_output";
-    crimp_squashfs_entry_list oversized_list;
+    crimp_fs_entry_list oversized_list;
     if (crimp_squashfs_extract(oversized_path, oversized_out_dir, &oversized_list) == 0) {
         fprintf(stderr,
                 "FAIL: expected crimp_squashfs_extract to reject file_size=5GiB (over the "
                 "MAX_EXTRACTED_FILE_SIZE cap) even with a block count under the separate cap\n");
-        crimp_squashfs_entry_list_free(&oversized_list);
+        crimp_fs_entry_list_free(&oversized_list);
         return 1;
     }
 
@@ -780,14 +780,14 @@ int main(void) {
     char planted_config_path[1024];
     snprintf(planted_config_path, sizeof(planted_config_path), "%s/config.txt", planted_symlink_path);
     if (make_symlink(planted_target, planted_config_path) == 0) {
-        crimp_squashfs_entry_list symlink_list;
+        crimp_fs_entry_list symlink_list;
         int symlink_rc = crimp_squashfs_extract(FIXTURE_PATH, symlink_out_dir, &symlink_list);
         if (symlink_rc == 0) {
             fprintf(stderr,
                     "FAIL: expected crimp_squashfs_extract to reject writing through a "
                     "pre-planted symlink at '%s'\n",
                     planted_config_path);
-            crimp_squashfs_entry_list_free(&symlink_list);
+            crimp_fs_entry_list_free(&symlink_list);
             return 1;
         }
         FILE *escaped = fopen(planted_target, "rb");

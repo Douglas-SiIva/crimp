@@ -55,6 +55,17 @@ static void scan_directory(const char *root_path) {
     crimp_scan_result_free(&result);
 }
 
+static const char *fs_type_name(crimp_fs_type type) {
+    switch (type) {
+        case CRIMP_FS_SQUASHFS:
+            return "squashfs";
+        case CRIMP_FS_CRAMFS:
+            return "cramfs";
+        default:
+            return "unknown";
+    }
+}
+
 static void identify_and_extract(const char *path) {
     crimp_fs_info info;
     if (crimp_fs_identify(path, &info) != 0) {
@@ -62,7 +73,7 @@ static void identify_and_extract(const char *path) {
         return;
     }
 
-    printf("filesystem:    squashfs\n");
+    printf("filesystem:    %s\n", fs_type_name(info.type));
     printf("inodes:        %u\n", info.inode_count);
     printf("block_size:    %u\n", info.block_size);
     printf("compression:   %s\n", crimp_fs_compression_name(info.type, info.compression));

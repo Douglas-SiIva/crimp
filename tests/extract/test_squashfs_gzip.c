@@ -40,7 +40,7 @@ static int find_expected(const char *path) {
 }
 
 int main(void) {
-    crimp_squashfs_entry_list list;
+    crimp_fs_entry_list list;
     if (crimp_squashfs_list(FIXTURE_PATH, &list) != 0) {
         fprintf(stderr, "FAIL: crimp_squashfs_list failed on %s\n", FIXTURE_PATH);
         return 1;
@@ -48,7 +48,7 @@ int main(void) {
 
     if (list.count != EXPECTED_COUNT) {
         fprintf(stderr, "FAIL: expected %zu entries, got %zu\n", EXPECTED_COUNT, list.count);
-        crimp_squashfs_entry_list_free(&list);
+        crimp_fs_entry_list_free(&list);
         return 1;
     }
 
@@ -59,7 +59,7 @@ int main(void) {
         int idx = find_expected(list.items[i].path);
         if (idx < 0) {
             fprintf(stderr, "FAIL: unexpected entry '%s'\n", list.items[i].path);
-            crimp_squashfs_entry_list_free(&list);
+            crimp_fs_entry_list_free(&list);
             return 1;
         }
         const expected_entry *e = &EXPECTED[idx];
@@ -70,13 +70,13 @@ int main(void) {
                     "size=%llu)\n",
                     list.items[i].path, list.items[i].is_dir,
                     (unsigned long long)list.items[i].size, e->is_dir, e->size);
-            crimp_squashfs_entry_list_free(&list);
+            crimp_fs_entry_list_free(&list);
             return 1;
         }
         seen[idx] = 1;
     }
 
-    crimp_squashfs_entry_list_free(&list);
+    crimp_fs_entry_list_free(&list);
 
     for (size_t i = 0; i < EXPECTED_COUNT; i++) {
         if (!seen[i]) {
