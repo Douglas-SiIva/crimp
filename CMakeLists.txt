@@ -28,6 +28,7 @@ add_library(crimp STATIC
     src/core/sbom.c
     src/core/scan.c
     src/extract/identify.c
+    src/extract/fs_util.c
     src/extract/squashfs.c
     src/detectors/weak_credentials.c
     src/detectors/exposed_protocols.c
