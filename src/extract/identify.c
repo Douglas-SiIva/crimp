@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #if defined(_WIN32)
 #include <direct.h>
+#include <windows.h>
 #endif
 
 int crimp_fs_identify(const char *path, crimp_fs_info *out) {
@@ -25,15 +26,38 @@ const char *crimp_fs_compression_name(crimp_fs_type type, uint16_t compression) 
     return "unknown";
 }
 
+/* Non-following directory check - never uses stat()/opendir() directly on a
+ * path whose type hasn't already been confirmed this way, so remove_tree()
+ * below can't be tricked into recursing through a symlink swapped in for a
+ * real directory between the check and the recurse (the same class of
+ * mitigation squashfs.c's path_is_symlink()/path_is_existing_directory()
+ * already apply to extraction). This narrows, but - short of descriptor-based
+ * *at() syscalls, not worth the portability cost for a single-user CLI tool
+ * only ever deleting its own temp/output directories - can't fully close,
+ * the underlying check-then-act race. */
+static int is_real_directory_not_symlink(const char *path) {
+#if defined(_WIN32)
+    DWORD attrs = GetFileAttributesA(path);
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+           (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+#else
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
 /* Best-effort recursive removal of `path`. Only ever called below on a
  * directory this function fully owns the lifecycle of - a fresh temp
  * staging directory this same call just created, or output_dir immediately
  * before replacing it with a verified-complete new extraction - never on an
  * arbitrary caller-supplied path whose contents aren't already known. */
 static void remove_tree(const char *path) {
+    if (!is_real_directory_not_symlink(path)) {
+        remove(path); /* a symlink, a plain file, or doesn't exist - fine either way */
+        return;
+    }
     DIR *d = opendir(path);
     if (!d) {
-        remove(path); /* not a directory (or doesn't exist) - fine either way */
         return;
     }
     struct dirent *entry;
@@ -46,15 +70,7 @@ static void remove_tree(const char *path) {
         if (n < 0 || (size_t)n >= sizeof(child)) {
             continue;
         }
-        struct stat st;
-        if (stat(child, &st) != 0) {
-            continue;
-        }
-        if (S_ISDIR(st.st_mode)) {
-            remove_tree(child);
-        } else {
-            remove(child);
-        }
+        remove_tree(child);
     }
     closedir(d);
 #if defined(_WIN32)
