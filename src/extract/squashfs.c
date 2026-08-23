@@ -741,45 +741,6 @@ static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
     return 0;
 }
 
-void crimp_fs_entry_list_init(crimp_fs_entry_list *list) {
-    list->items = NULL;
-    list->count = 0;
-    list->capacity = 0;
-}
-
-static int entry_list_add(crimp_fs_entry_list *list, const char *path, int is_dir,
-                           uint64_t size) {
-    if (list->count == list->capacity) {
-        size_t new_capacity = list->capacity == 0 ? 16 : list->capacity * 2;
-        crimp_fs_entry *items = (crimp_fs_entry *)realloc(
-            list->items, new_capacity * sizeof(crimp_fs_entry));
-        if (!items) {
-            return -1;
-        }
-        list->items = items;
-        list->capacity = new_capacity;
-    }
-
-    crimp_fs_entry *e = &list->items[list->count];
-    e->path = strdup(path);
-    if (!e->path) {
-        return -1;
-    }
-    e->is_dir = is_dir;
-    e->size = size;
-    list->count++;
-    return 0;
-}
-
-void crimp_fs_entry_list_free(crimp_fs_entry_list *list) {
-    for (size_t i = 0; i < list->count; i++) {
-        free(list->items[i].path);
-    }
-    free(list->items);
-    list->items = NULL;
-    list->count = 0;
-    list->capacity = 0;
-}
 
 /* MAX_DIR_DEPTH's rationale is documented on walk_directory below, next to
  * the code that actually enforces it. */
@@ -878,7 +839,7 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
      * credentials, exposed protocols, whatever else) from every
      * downstream detector. */
     int is_dir = (child.type == 1 || child.type == 8);
-    if (entry_list_add(ctx->out, child_path, is_dir, is_dir ? 0 : child.file_size) != 0) {
+    if (crimp_fs_entry_list_add(ctx->out, child_path, is_dir, is_dir ? 0 : child.file_size) != 0) {
         squashfs_inode_free(&child);
         return -1;
     }

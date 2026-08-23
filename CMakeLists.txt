@@ -30,6 +30,7 @@ add_library(crimp STATIC
     src/extract/identify.c
     src/extract/fs_util.c
     src/extract/squashfs.c
+    src/extract/cramfs.c
     src/detectors/weak_credentials.c
     src/detectors/exposed_protocols.c
     src/detectors/weak_crypto.c
@@ -121,6 +122,24 @@ target_compile_definitions(test_squashfs_mutation_sweep PRIVATE
     OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/squashfs_mutation_output")
 add_test(NAME squashfs_mutation_sweep COMMAND test_squashfs_mutation_sweep)
 
+add_executable(test_cramfs_extract tests/extract/test_cramfs_extract.c)
+target_include_directories(test_cramfs_extract PRIVATE src/extract)
+target_link_libraries(test_cramfs_extract PRIVATE crimp)
+target_compile_definitions(test_cramfs_extract PRIVATE
+    FIXTURE_PATH="${CMAKE_SOURCE_DIR}/tests/fixtures/cramfs_extract.img"
+    OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/cramfs_extract_output")
+add_test(NAME cramfs_extract COMMAND test_cramfs_extract)
+
+add_executable(test_cramfs_endian tests/extract/test_cramfs_endian.c)
+target_include_directories(test_cramfs_endian PRIVATE src/extract)
+target_link_libraries(test_cramfs_endian PRIVATE crimp)
+add_test(NAME cramfs_endian COMMAND test_cramfs_endian)
+
+add_executable(test_cramfs_synthetic tests/extract/test_cramfs_synthetic.c)
+target_include_directories(test_cramfs_synthetic PRIVATE src/extract)
+target_link_libraries(test_cramfs_synthetic PRIVATE crimp)
+add_test(NAME cramfs_synthetic COMMAND test_cramfs_synthetic)
+
 add_executable(test_squashfs_mutation_sweep_xz tests/extract/test_squashfs_mutation_sweep.c)
 target_include_directories(test_squashfs_mutation_sweep_xz PRIVATE src/extract)
 target_link_libraries(test_squashfs_mutation_sweep_xz PRIVATE crimp)
@@ -129,6 +148,15 @@ target_compile_definitions(test_squashfs_mutation_sweep_xz PRIVATE
     WORK_FILE="${CMAKE_CURRENT_BINARY_DIR}/squashfs_mutation_work_xz.img"
     OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/squashfs_mutation_output_xz")
 add_test(NAME squashfs_mutation_sweep_xz COMMAND test_squashfs_mutation_sweep_xz)
+
+add_executable(test_cramfs_mutation_sweep tests/extract/test_cramfs_mutation_sweep.c)
+target_include_directories(test_cramfs_mutation_sweep PRIVATE src/extract)
+target_link_libraries(test_cramfs_mutation_sweep PRIVATE crimp)
+target_compile_definitions(test_cramfs_mutation_sweep PRIVATE
+    FIXTURE_PATH="${CMAKE_SOURCE_DIR}/tests/fixtures/cramfs_extract.img"
+    WORK_FILE="${CMAKE_CURRENT_BINARY_DIR}/cramfs_mutation_work.img"
+    OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/cramfs_mutation_output")
+add_test(NAME cramfs_mutation_sweep COMMAND test_cramfs_mutation_sweep)
 
 add_executable(spike_capstone_test spike/capstone-test/test_disasm.c)
 target_link_libraries(spike_capstone_test PRIVATE capstone::capstone)

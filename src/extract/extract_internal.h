@@ -27,6 +27,16 @@ typedef struct {
 void crimp_fs_entry_list_init(crimp_fs_entry_list *list);
 void crimp_fs_entry_list_free(crimp_fs_entry_list *list);
 
+/* Appends one entry (a copy of `path`) to `list`, growing its backing array
+ * as needed. Returns 0 on success, -1 on allocation failure. */
+int crimp_fs_entry_list_add(crimp_fs_entry_list *list, const char *path, int is_dir,
+                             uint64_t size);
+
+int crimp_cramfs_identify(const char *path, crimp_fs_info *out);
+const char *crimp_cramfs_compression_name(void);
+int crimp_cramfs_list(const char *path, crimp_fs_entry_list *out);
+int crimp_cramfs_extract(const char *path, const char *output_dir, crimp_fs_entry_list *out);
+
 /* Returns 0 on success, -1 on a malformed image, an unsupported (compressed
  * metadata) image, or if `path` can't be read/isn't a SquashFS image. */
 int crimp_squashfs_list(const char *path, crimp_fs_entry_list *out);

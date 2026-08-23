@@ -1,6 +1,7 @@
 #include "fs_util.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if defined(_WIN32)
@@ -63,6 +64,18 @@ static int is_windows_reserved_name(const char *name, size_t len) {
 }
 
 int crimp_fs_path_component_is_safe(const char *name, size_t len) {
+    /* A real entry name is never empty. Rejecting it here rather than
+     * trusting every caller to guard against it independently matters: an
+     * earlier version of this exact codebase shipped a critical
+     * path-traversal bug (PR #33) rooted in exactly this class of mistake -
+     * a caller-side invariant ("this path can't produce a zero-length
+     * value") that turned out not to hold for a crafted image. This
+     * function is now shared by more than one filesystem parser
+     * (squashfs.c, cramfs.c) specifically so that lesson doesn't have to be
+     * re-learned by whichever one gets added next (JFFS2, #8). */
+    if (len == 0) {
+        return 0;
+    }
     if (len == 1 && name[0] == '.') {
         return 0;
     }
@@ -127,4 +140,44 @@ int crimp_fs_join_output_path(const char *output_dir, const char *rel_path, char
         return -1;
     }
     return 0;
+}
+
+void crimp_fs_entry_list_init(crimp_fs_entry_list *list) {
+    list->items = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+int crimp_fs_entry_list_add(crimp_fs_entry_list *list, const char *path, int is_dir,
+                             uint64_t size) {
+    if (list->count == list->capacity) {
+        size_t new_capacity = list->capacity == 0 ? 16 : list->capacity * 2;
+        crimp_fs_entry *items =
+            (crimp_fs_entry *)realloc(list->items, new_capacity * sizeof(crimp_fs_entry));
+        if (!items) {
+            return -1;
+        }
+        list->items = items;
+        list->capacity = new_capacity;
+    }
+
+    crimp_fs_entry *e = &list->items[list->count];
+    e->path = strdup(path);
+    if (!e->path) {
+        return -1;
+    }
+    e->is_dir = is_dir;
+    e->size = size;
+    list->count++;
+    return 0;
+}
+
+void crimp_fs_entry_list_free(crimp_fs_entry_list *list) {
+    for (size_t i = 0; i < list->count; i++) {
+        free(list->items[i].path);
+    }
+    free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->capacity = 0;
 }

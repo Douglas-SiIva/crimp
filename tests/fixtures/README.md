@@ -133,3 +133,50 @@ against `unsquashfs -d`'s output. That large image isn't committed (too big
 for a fixture); regenerate ad hoc with `mksquashfs /usr/share/doc large.img
 -comp xz -all-root` if you need to re-verify against something bigger than
 this toy tree.
+
+## cramfs_extract.img
+
+Issue #9 (cramfs support). Same tree/content as `squashfs_extract.img`
+(minus `etc/config.txt`'s trailing newline differences - identical files),
+but `bin/bigfile.bin` is 9000 bytes instead of 11000 (cramfs's block size is
+fixed at 4096, not configurable via a `-b` flag the way squashfs's is - 9000
+bytes spans 3 blocks: 4096 + 4096 + 808). Built with real `mkfs.cramfs`
+(part of `util-linux`, already installed wherever `util-linux` is - no
+extra install needed on this project's WSL dev environment, unlike JFFS2's
+`mtd-utils`). Regenerate with:
+
+```sh
+mkdir -p /tmp/crimp_cramfs_fixture/etc /tmp/crimp_cramfs_fixture/bin/nested
+echo "hello=world" > /tmp/crimp_cramfs_fixture/etc/config.txt
+echo "root:x:0:0:root:/root:/bin/sh" > /tmp/crimp_cramfs_fixture/etc/passwd
+printf "FAKE_BUSYBOX_BINARY_CONTENT_1234567890" > /tmp/crimp_cramfs_fixture/bin/busybox
+printf "nested file content here" > /tmp/crimp_cramfs_fixture/bin/nested/deep.txt
+ln -s /bin/busybox /tmp/crimp_cramfs_fixture/bin/sh
+python3 -c "import sys; sys.stdout.buffer.write((b'0123456789' * 1000)[:9000])" \
+    > /tmp/crimp_cramfs_fixture/bin/bigfile.bin
+mkfs.cramfs /tmp/crimp_cramfs_fixture cramfs_extract.img
+```
+
+Before landing, first confirmed the actual on-disk superblock/inode layout
+against a real image's raw bytes directly (a first AI-summarized read of
+the kernel driver got the superblock size wrong by nearly 3x - see
+`.claude/skills/cramfs-extraction/SKILL.md` for the full story and why a
+single unverified source shouldn't be trusted for binary format work).
+Then validated the same way as the squashfs fixtures: this fixture's
+content byte-for-byte identical to `fsck.cramfs --extract` (sha256sum
+match), plus a much larger real-world image (the same real `/usr/share/doc`
+tree used for the squashfs validations, ~10.7MB, 2537 files/621 dirs/212
+symlinks) diffed both by file list (2537/2537 exact match) and by sha256
+hash of every extracted file (2537/2537 exact match) against
+`fsck.cramfs --extract`'s output. That large image isn't committed (too big
+for a fixture); regenerate ad hoc with `mkfs.cramfs /usr/share/doc large.img`
+if you need to re-verify against something bigger than this toy tree.
+`bin/sh` (a symlink) is deliberately *not* extracted as a file, same choice
+as squashfs.
+
+cramfs's one real trap squashfs never had - on-disk byte order isn't fixed,
+a big-endian-host image is genuinely big-endian on disk - is covered by a
+separate, hand-built fixture (`test_cramfs_endian.c` constructs its own tiny
+big-endian image at test time, not committed as a binary; no big-endian-host
+tool was conveniently available to generate a real one in this dev
+environment).

@@ -1,6 +1,8 @@
 #ifndef CRIMP_FS_UTIL_H
 #define CRIMP_FS_UTIL_H
 
+#include "extract_internal.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
