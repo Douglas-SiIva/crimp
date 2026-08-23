@@ -52,7 +52,7 @@ int main(void) {
 
     crimp_scan_result result;
     crimp_scan_result_init(&result);
-    crimp_scan_directory(fixture_dir, &result);
+    crimp_scan_directory(fixture_dir, NULL, &result);
 
     int saw_finding = result.findings.count > 0;
 
@@ -72,6 +72,30 @@ int main(void) {
                 "FAIL: expected at least one finding and a BusyBox component, got %zu "
                 "finding(s), %zu component(s)\n",
                 finding_count, component_count);
+        return 1;
+    }
+
+    /* A --rules directory that can't be opened must be surfaced via the
+     * return code, not silently ignored (a security scanner staying quiet
+     * about "your custom rules never actually loaded" is a false sense of
+     * completeness). The built-in detectors/components must still have run
+     * normally regardless. */
+    crimp_scan_result bad_rules_result;
+    crimp_scan_result_init(&bad_rules_result);
+    int rc = crimp_scan_directory(fixture_dir, "test_fixture_rules_dir_does_not_exist",
+                                   &bad_rules_result);
+    int still_worked = bad_rules_result.findings.count > 0;
+    crimp_scan_result_free(&bad_rules_result);
+    if (rc == 0) {
+        fprintf(stderr,
+                "FAIL: expected crimp_scan_directory to return nonzero when --rules points at "
+                "a directory that can't be opened\n");
+        return 1;
+    }
+    if (!still_worked) {
+        fprintf(stderr,
+                "FAIL: built-in detectors should still run normally even when the rules "
+                "directory can't be opened\n");
         return 1;
     }
 

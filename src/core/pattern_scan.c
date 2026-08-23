@@ -27,7 +27,8 @@ static void scan_file(const char *path, void *userdata) {
     for (size_t i = 0; i < ctx->marker_count; i++) {
         if (strstr(buf, ctx->markers[i].pattern)) {
             snprintf(desc, sizeof(desc), "%s (%s)", ctx->markers[i].description, path);
-            crimp_finding_list_add(ctx->out, ctx->detector_name, desc, ctx->markers[i].severity);
+            const char *name = ctx->markers[i].name ? ctx->markers[i].name : ctx->detector_name;
+            crimp_finding_list_add(ctx->out, name, desc, ctx->markers[i].severity);
         }
     }
 }

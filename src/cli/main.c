@@ -3,6 +3,7 @@
 #include "crimp/sbom.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
 
 static const char *severity_name(crimp_severity s) {
@@ -28,10 +29,13 @@ static int is_directory(const char *path) {
     return S_ISDIR(st.st_mode) ? 1 : 0;
 }
 
-static void scan_directory(const char *root_path) {
+static void scan_directory(const char *root_path, const char *rules_dir) {
     crimp_scan_result result;
     crimp_scan_result_init(&result);
-    crimp_scan_directory(root_path, &result);
+    if (crimp_scan_directory(root_path, rules_dir, &result) != 0) {
+        fprintf(stderr, "warning: --rules directory '%s' could not be opened - no user-defined rules were loaded\n",
+                rules_dir);
+    }
 
     printf("=== Findings (%zu) ===\n", result.findings.count);
     for (size_t i = 0; i < result.findings.count; i++) {
@@ -66,7 +70,7 @@ static const char *fs_type_name(crimp_fs_type type) {
     }
 }
 
-static void identify_and_extract(const char *path) {
+static void identify_and_extract(const char *path, const char *rules_dir) {
     crimp_fs_info info;
     if (crimp_fs_identify(path, &info) != 0) {
         fprintf(stderr, "%s: filesystem not recognized\n", path);
@@ -94,19 +98,36 @@ static void identify_and_extract(const char *path) {
     }
 
     printf("Extraction complete, scanning...\n\n");
-    scan_directory(output_dir);
+    scan_directory(output_dir, rules_dir);
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <firmware-image-or-extracted-dir>\n", argv[0]);
+    const char *target = NULL;
+    const char *rules_dir = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--rules") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --rules requires a directory argument\n", argv[0]);
+                return 1;
+            }
+            rules_dir = argv[++i];
+        } else if (target == NULL) {
+            target = argv[i];
+        } else {
+            target = NULL; /* more than one positional argument: usage error below */
+            break;
+        }
+    }
+
+    if (target == NULL) {
+        fprintf(stderr, "usage: %s <firmware-image-or-extracted-dir> [--rules <dir>]\n", argv[0]);
         return 1;
     }
 
-    if (is_directory(argv[1])) {
-        scan_directory(argv[1]);
+    if (is_directory(target)) {
+        scan_directory(target, rules_dir);
     } else {
-        identify_and_extract(argv[1]);
+        identify_and_extract(target, rules_dir);
     }
 
     return 0;
