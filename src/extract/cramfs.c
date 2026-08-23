@@ -159,12 +159,19 @@ static int walk_directory(cramfs_walk_context *ctx, uint64_t offset, uint32_t si
  * prev_end means a "hole" (zero-filled block, no bytes on disk) - same
  * concept as squashfs's sparse blocks. Confirmed against util-linux's
  * fsck.cramfs.c (do_uncompress) - see SKILL.md. */
+/* `disk_path` reaching every fopen()/remove() below has already been through
+ * crimp_fs_path_component_is_safe() + crimp_fs_join_output_path() in
+ * process_dir_entry() - the real sanitization, validated against
+ * deliberately crafted traversal images (see fixture READMEs). SonarCloud's
+ * c:S2083 (BETA path-injection taint rule) doesn't recognize that as a
+ * taint-clearing boundary and flags every use downstream as a "leak" -
+ * false positive, same class already documented in squashfs.c/fs_util.c. */
 static int extract_regular_file(FILE *f, const cramfs_super *sb, const cramfs_inode *inode,
                                  const char *disk_path) {
     if (crimp_fs_path_is_symlink(disk_path)) {
         return -1;
     }
-    FILE *out = fopen(disk_path, "wb");
+    FILE *out = fopen(disk_path, "wb"); // NOSONAR
     if (!out) {
         return -1;
     }
@@ -177,7 +184,7 @@ static int extract_regular_file(FILE *f, const cramfs_super *sb, const cramfs_in
     uint8_t *block_buf = (uint8_t *)malloc(CRAMFS_BLOCK_SIZE);
     if (!block_buf) {
         fclose(out);
-        remove(disk_path);
+        remove(disk_path); // NOSONAR
         return -1;
     }
 
@@ -247,7 +254,7 @@ static int extract_regular_file(FILE *f, const cramfs_super *sb, const cramfs_in
     if (!ok) {
         /* Don't leave a truncated file behind - same discipline as
          * squashfs's extract_regular_file. */
-        remove(disk_path);
+        remove(disk_path); // NOSONAR - see the c:S2083 note on this function's signature
         return -1;
     }
     return 0;
@@ -303,10 +310,15 @@ static int process_dir_entry(cramfs_walk_context *ctx, uint64_t *pos, uint32_t *
 
     char child_path[1024];
     int n;
+    /* `name` was just validated by crimp_fs_path_component_is_safe() two
+     * lines above - SonarCloud's c:S5145 (same BETA taint-analysis family
+     * as c:S2083) doesn't recognize that call as clearing the taint.
+     * NOSONAR */
     if (parent_path[0] == '\0') {
-        n = snprintf(child_path, sizeof(child_path), "%.*s", (int)real_len, name);
+        n = snprintf(child_path, sizeof(child_path), "%.*s", (int)real_len, name); // NOSONAR
     } else {
-        n = snprintf(child_path, sizeof(child_path), "%s/%.*s", parent_path, (int)real_len, name);
+        n = snprintf(child_path, sizeof(child_path), "%s/%.*s", parent_path, (int)real_len, // NOSONAR
+                      name);
     }
     if (n < 0 || (size_t)n >= sizeof(child_path)) {
         return -1;
