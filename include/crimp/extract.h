@@ -27,6 +27,14 @@ int crimp_fs_identify(const char *path, crimp_fs_info *out);
 
 const char *crimp_fs_compression_name(crimp_fs_type type, uint16_t compression);
 
+/* Extracts the recognized filesystem at `path` into `output_dir` (created if
+ * missing), mirroring its directory structure with real (decompressed) file
+ * content, so detectors/SBOM generation can run against it directly. Returns
+ * 0 on success, -1 if the format isn't recognized/supported (including an
+ * unsupported compressor) or extraction otherwise failed (malformed image,
+ * output_dir couldn't be created/written to). */
+int crimp_fs_extract(const char *path, const char *output_dir);
+
 #ifdef __cplusplus
 }
 #endif

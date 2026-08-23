@@ -55,7 +55,7 @@ static void scan_directory(const char *root_path) {
     crimp_scan_result_free(&result);
 }
 
-static void identify_firmware(const char *path) {
+static void identify_and_extract(const char *path) {
     crimp_fs_info info;
     if (crimp_fs_identify(path, &info) != 0) {
         fprintf(stderr, "%s: filesystem not recognized\n", path);
@@ -67,8 +67,23 @@ static void identify_firmware(const char *path) {
     printf("block_size:    %u\n", info.block_size);
     printf("compression:   %s\n", crimp_fs_compression_name(info.type, info.compression));
     printf("bytes_used:    %llu\n", (unsigned long long)info.bytes_used);
-    printf("\nNote: full extraction isn't implemented yet (#7) - pass an already-extracted\n");
-    printf("directory instead to run detectors and generate an SBOM.\n");
+
+    char output_dir[1024];
+    int n = snprintf(output_dir, sizeof(output_dir), "%s.crimp-extracted", path);
+    if (n < 0 || (size_t)n >= sizeof(output_dir)) {
+        fprintf(stderr, "%s: path too long to build an extraction directory\n", path);
+        return;
+    }
+
+    printf("\nExtracting to %s ...\n", output_dir);
+    if (crimp_fs_extract(path, output_dir) != 0) {
+        fprintf(stderr,
+                "%s: extraction failed (malformed image or unsupported compressor)\n", path);
+        return;
+    }
+
+    printf("Extraction complete, scanning...\n\n");
+    scan_directory(output_dir);
 }
 
 int main(int argc, char **argv) {
@@ -80,7 +95,7 @@ int main(int argc, char **argv) {
     if (is_directory(argv[1])) {
         scan_directory(argv[1]);
     } else {
-        identify_firmware(argv[1]);
+        identify_and_extract(argv[1]);
     }
 
     return 0;
