@@ -57,7 +57,7 @@ int main(void) {
             saw_busybox = 1;
         }
         if (strcmp(components.items[i].component, "OpenSSL") == 0 &&
-            strcmp(components.items[i].version, "1.1.1") == 0) {
+            strcmp(components.items[i].version, "1.1.1k") == 0) {
             saw_openssl = 1;
         }
     }
@@ -67,7 +67,7 @@ int main(void) {
 
     if (!saw_busybox || !saw_openssl) {
         fprintf(stderr,
-                "FAIL: expected BusyBox 1.31.1 and OpenSSL 1.1.1 identified, got %zu "
+                "FAIL: expected BusyBox 1.31.1 and OpenSSL 1.1.1k identified, got %zu "
                 "component(s)\n",
                 total);
         return 1;

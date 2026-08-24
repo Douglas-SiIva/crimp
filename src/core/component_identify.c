@@ -22,14 +22,20 @@ static const component_marker COMPONENT_MARKERS[] = {
 };
 #define COMPONENT_MARKER_COUNT (sizeof(COMPONENT_MARKERS) / sizeof(COMPONENT_MARKERS[0]))
 
-/* Copies leading version-shaped characters (digits, '.', '-') from `start`
- * into `out`, stopping at the first character that doesn't fit, at
- * `max_len` bytes remaining in the source buffer, or at an embedded NUL
- * (binary data, not a printable version string here). */
+/* Copies leading version-shaped characters (digits, '.', '-', lowercase
+ * letters) from `start` into `out`, stopping at the first character that
+ * doesn't fit, at `max_len` bytes remaining in the source buffer, or at an
+ * embedded NUL (binary data, not a printable version string here).
+ * Lowercase letters matter for OpenSSL's classic "1.1.1k"-style trailing
+ * patch letter (dropped entirely before this - a real 1.1.1n install
+ * extracted as just "1.1.1", which compares as *older* than any lettered
+ * version and over-reports CVEs actually fixed by that patch letter - see
+ * crimp/cve.h's known-limitation note, now narrowed by this). */
 static void extract_version(const char *start, size_t max_len, char *out, size_t out_size) {
     size_t i = 0;
     while (i < out_size - 1 && i < max_len && start[i] != '\0' &&
-           (isdigit((unsigned char)start[i]) || start[i] == '.' || start[i] == '-')) {
+           (isdigit((unsigned char)start[i]) || start[i] == '.' || start[i] == '-' ||
+            (start[i] >= 'a' && start[i] <= 'z'))) {
         out[i] = start[i];
         i++;
     }

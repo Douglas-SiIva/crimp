@@ -1,6 +1,7 @@
 #ifndef CRIMP_SCAN_H
 #define CRIMP_SCAN_H
 
+#include "crimp/cve.h"
 #include "crimp/detector.h"
 #include "crimp/inventory.h"
 #include "crimp/yaml_rules.h"
@@ -26,16 +27,21 @@ void crimp_scan_result_free(crimp_scan_result *result);
  * *.yaml/*.yml file directly inside it is loaded as additional
  * user-defined pattern rules (see crimp/yaml_rules.h) and run in the same
  * pass, appending to the same `result->findings`. Pass NULL to skip
- * user-defined rules entirely (the original behavior).
+ * user-defined rules entirely (the original behavior). If
+ * `cve_dataset_path` is non-NULL, identified components are matched
+ * against it (see crimp/cve.h) once component identification finishes,
+ * appending any (component, CVE) matches to the same `result->findings`.
+ * Pass NULL to skip CVE matching entirely.
  *
- * Returns 0 normally, or -1 if `rules_dir` was given but couldn't be opened
- * (e.g. a typo'd path) - the built-in detectors and component
- * identification still ran and `result` is still fully populated with
- * whatever they found, but silently proceeding with zero user-defined
- * findings when the user asked for some would be a false sense of
- * completeness in a security scanner, so the caller gets a way to notice
- * and warn about it instead of that failure being invisible. */
-int crimp_scan_directory(const char *root_path, const char *rules_dir, crimp_scan_result *result);
+ * Returns 0 normally, or -1 if `rules_dir` or `cve_dataset_path` was given
+ * but couldn't be opened/parsed (e.g. a typo'd path) - everything else
+ * still ran and `result` is still fully populated with whatever it found,
+ * but silently proceeding with an incomplete finding set when the user
+ * asked for more would be a false sense of completeness in a security
+ * scanner, so the caller gets a way to notice and warn about it instead of
+ * that failure being invisible. */
+int crimp_scan_directory(const char *root_path, const char *rules_dir,
+                          const char *cve_dataset_path, crimp_scan_result *result);
 
 #ifdef __cplusplus
 }

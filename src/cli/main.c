@@ -29,12 +29,23 @@ static int is_directory(const char *path) {
     return S_ISDIR(st.st_mode) ? 1 : 0;
 }
 
-static void scan_directory(const char *root_path, const char *rules_dir) {
+static void scan_directory(const char *root_path, const char *rules_dir,
+                            const char *cve_dataset_path) {
     crimp_scan_result result;
     crimp_scan_result_init(&result);
-    if (crimp_scan_directory(root_path, rules_dir, &result) != 0) {
-        fprintf(stderr, "warning: --rules directory '%s' could not be opened - no user-defined rules were loaded\n",
-                rules_dir);
+    if (crimp_scan_directory(root_path, rules_dir, cve_dataset_path, &result) != 0) {
+        if (rules_dir != NULL) {
+            fprintf(stderr,
+                    "warning: --rules directory '%s' could not be opened - no user-defined "
+                    "rules were loaded\n",
+                    rules_dir);
+        }
+        if (cve_dataset_path != NULL) {
+            fprintf(stderr,
+                    "warning: --cve-dataset '%s' could not be opened or parsed - no CVE "
+                    "matches were checked\n",
+                    cve_dataset_path);
+        }
     }
 
     printf("=== Findings (%zu) ===\n", result.findings.count);
@@ -72,7 +83,8 @@ static const char *fs_type_name(crimp_fs_type type) {
     }
 }
 
-static void identify_and_extract(const char *path, const char *rules_dir) {
+static void identify_and_extract(const char *path, const char *rules_dir,
+                                  const char *cve_dataset_path) {
     crimp_fs_info info;
     if (crimp_fs_identify(path, &info) != 0) {
         fprintf(stderr, "%s: filesystem not recognized\n", path);
@@ -100,12 +112,13 @@ static void identify_and_extract(const char *path, const char *rules_dir) {
     }
 
     printf("Extraction complete, scanning...\n\n");
-    scan_directory(output_dir, rules_dir);
+    scan_directory(output_dir, rules_dir, cve_dataset_path);
 }
 
 int main(int argc, char **argv) {
     const char *target = NULL;
     const char *rules_dir = NULL;
+    const char *cve_dataset_path = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--rules") == 0) {
             if (i + 1 >= argc) {
@@ -113,6 +126,12 @@ int main(int argc, char **argv) {
                 return 1;
             }
             rules_dir = argv[++i];
+        } else if (strcmp(argv[i], "--cve-dataset") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "%s: --cve-dataset requires a file argument\n", argv[0]);
+                return 1;
+            }
+            cve_dataset_path = argv[++i];
         } else if (target == NULL) {
             target = argv[i];
         } else {
@@ -122,14 +141,17 @@ int main(int argc, char **argv) {
     }
 
     if (target == NULL) {
-        fprintf(stderr, "usage: %s <firmware-image-or-extracted-dir> [--rules <dir>]\n", argv[0]);
+        fprintf(stderr,
+                "usage: %s <firmware-image-or-extracted-dir> [--rules <dir>] [--cve-dataset "
+                "<file>]\n",
+                argv[0]);
         return 1;
     }
 
     if (is_directory(target)) {
-        scan_directory(target, rules_dir);
+        scan_directory(target, rules_dir, cve_dataset_path);
     } else {
-        identify_and_extract(target, rules_dir);
+        identify_and_extract(target, rules_dir, cve_dataset_path);
     }
 
     return 0;
