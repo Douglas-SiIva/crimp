@@ -14,7 +14,7 @@ void crimp_scan_result_free(crimp_scan_result *result) {
 }
 
 int crimp_scan_directory(const char *root_path, const char *rules_dir,
-                          crimp_scan_result *result) {
+                          const char *cve_dataset_path, crimp_scan_result *result) {
     crimp_registry reg;
     crimp_registry_init(&reg);
     crimp_registry_add(&reg, &crimp_detector_weak_credentials);
@@ -24,14 +24,23 @@ int crimp_scan_directory(const char *root_path, const char *rules_dir,
     crimp_registry_run_all(&reg, root_path, &result->findings);
     crimp_identify_components(root_path, &result->components);
 
-    if (rules_dir == NULL) {
-        return 0;
+    int rc = 0;
+    if (rules_dir != NULL) {
+        crimp_yaml_rule_list rules;
+        crimp_yaml_rule_list_init(&rules);
+        if (crimp_yaml_rules_load_dir(rules_dir, &rules) != 0) {
+            rc |= CRIMP_SCAN_RULES_FAILED;
+        }
+        crimp_scan_directory_for_yaml_rules(root_path, &rules, &result->findings);
+        crimp_yaml_rule_list_free(&rules);
     }
 
-    crimp_yaml_rule_list rules;
-    crimp_yaml_rule_list_init(&rules);
-    int rc = crimp_yaml_rules_load_dir(rules_dir, &rules);
-    crimp_scan_directory_for_yaml_rules(root_path, &rules, &result->findings);
-    crimp_yaml_rule_list_free(&rules);
+    if (cve_dataset_path != NULL) {
+        if (crimp_cve_match_components(cve_dataset_path, &result->components,
+                                        &result->findings) != 0) {
+            rc |= CRIMP_SCAN_CVE_DATASET_FAILED;
+        }
+    }
+
     return rc;
 }

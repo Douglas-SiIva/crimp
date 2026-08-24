@@ -1,6 +1,7 @@
 #include "crimp/yaml_rules.h"
 
 #include "pattern_scan.h"
+#include "yaml_util.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -51,74 +52,16 @@ static int rule_list_add(crimp_yaml_rule_list *list, char *id, char *pattern, ch
     return 0;
 }
 
-/* Copies a scalar node's value into a fresh NUL-terminated heap string.
- * libyaml's scalar values aren't guaranteed NUL-terminated by the API
- * contract - always go through `.length`, never assume it. Returns NULL
- * for a non-scalar node or on allocation failure. */
-static char *dup_scalar(const yaml_node_t *node) {
-    if (!node || node->type != YAML_SCALAR_NODE) {
-        return NULL;
-    }
-    char *s = (char *)malloc(node->data.scalar.length + 1);
-    if (!s) {
-        return NULL;
-    }
-    memcpy(s, node->data.scalar.value, node->data.scalar.length);
-    s[node->data.scalar.length] = '\0';
-    return s;
-}
-
-/* Finds `key` among a YAML_MAPPING_NODE's pairs and returns its value node,
- * or NULL if `map_node` isn't a mapping or has no such key. */
-static yaml_node_t *mapping_get(yaml_document_t *doc, yaml_node_t *map_node, const char *key) {
-    if (!map_node || map_node->type != YAML_MAPPING_NODE) {
-        return NULL;
-    }
-    for (yaml_node_pair_t *pair = map_node->data.mapping.pairs.start;
-         pair < map_node->data.mapping.pairs.top; pair++) {
-        yaml_node_t *key_node = yaml_document_get_node(doc, pair->key);
-        if (key_node && key_node->type == YAML_SCALAR_NODE &&
-            key_node->data.scalar.length == strlen(key) &&
-            memcmp(key_node->data.scalar.value, key, key_node->data.scalar.length) == 0) {
-            return yaml_document_get_node(doc, pair->value);
-        }
-    }
-    return NULL;
-}
-
-static int parse_severity(const char *s, crimp_severity *out) {
-    if (strcmp(s, "low") == 0) {
-        *out = CRIMP_SEVERITY_LOW;
-    } else if (strcmp(s, "medium") == 0) {
-        *out = CRIMP_SEVERITY_MEDIUM;
-    } else if (strcmp(s, "high") == 0) {
-        *out = CRIMP_SEVERITY_HIGH;
-    } else if (strcmp(s, "critical") == 0) {
-        *out = CRIMP_SEVERITY_CRITICAL;
-    } else {
-        return -1;
-    }
-    return 0;
-}
-
-static void str_to_lower(char *s) {
-    for (; *s; s++) {
-        if (*s >= 'A' && *s <= 'Z') {
-            *s = (char)(*s - 'A' + 'a');
-        }
-    }
-}
-
 /* Parses one rule entry (a YAML_MAPPING_NODE with id/pattern/description/
  * severity scalar keys) into a freshly heap-allocated crimp_yaml_rule,
  * appended to `out`. Returns 0 on success, -1 if any required field is
  * missing, the wrong node type, or an unrecognized severity value -
  * nothing is left partially allocated on failure. */
 static int parse_rule_entry(yaml_document_t *doc, yaml_node_t *entry, crimp_yaml_rule_list *out) {
-    char *id = dup_scalar(mapping_get(doc, entry, "id"));
-    char *pattern = dup_scalar(mapping_get(doc, entry, "pattern"));
-    char *description = dup_scalar(mapping_get(doc, entry, "description"));
-    char *severity_str = dup_scalar(mapping_get(doc, entry, "severity"));
+    char *id = crimp_yaml_dup_scalar(crimp_yaml_mapping_get(doc, entry, "id"));
+    char *pattern = crimp_yaml_dup_scalar(crimp_yaml_mapping_get(doc, entry, "pattern"));
+    char *description = crimp_yaml_dup_scalar(crimp_yaml_mapping_get(doc, entry, "description"));
+    char *severity_str = crimp_yaml_dup_scalar(crimp_yaml_mapping_get(doc, entry, "severity"));
 
     int ok = 0;
     crimp_severity severity = CRIMP_SEVERITY_LOW;
@@ -126,8 +69,8 @@ static int parse_rule_entry(yaml_document_t *doc, yaml_node_t *entry, crimp_yaml
      * it here rather than let it silently flood every scan with a finding
      * on every single file under that rule's id. */
     if (id && pattern && pattern[0] != '\0' && description && severity_str) {
-        str_to_lower(severity_str);
-        ok = (parse_severity(severity_str, &severity) == 0);
+        crimp_yaml_str_to_lower(severity_str);
+        ok = (crimp_yaml_parse_severity(severity_str, &severity) == 0);
     }
     free(severity_str);
 
@@ -168,7 +111,7 @@ int crimp_yaml_rules_load_file(const char *path, crimp_yaml_rule_list *out) {
     }
 
     yaml_node_t *root = yaml_document_get_root_node(&doc);
-    yaml_node_t *rules_node = mapping_get(&doc, root, "rules");
+    yaml_node_t *rules_node = crimp_yaml_mapping_get(&doc, root, "rules");
     if (!rules_node || rules_node->type != YAML_SEQUENCE_NODE) {
         yaml_document_delete(&doc);
         return -1;

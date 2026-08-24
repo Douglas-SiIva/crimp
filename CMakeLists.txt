@@ -29,6 +29,8 @@ add_library(crimp STATIC
     src/core/sbom.c
     src/core/scan.c
     src/core/yaml_rules.c
+    src/core/yaml_util.c
+    src/core/cve_match.c
     src/extract/identify.c
     src/extract/fs_util.c
     src/extract/squashfs.c
@@ -73,6 +75,10 @@ add_test(NAME scan COMMAND test_scan)
 add_executable(test_yaml_rules tests/core/test_yaml_rules.c)
 target_link_libraries(test_yaml_rules PRIVATE crimp)
 add_test(NAME yaml_rules COMMAND test_yaml_rules)
+
+add_executable(test_cve_match tests/core/test_cve_match.c)
+target_link_libraries(test_cve_match PRIVATE crimp)
+add_test(NAME cve_match COMMAND test_cve_match)
 
 add_executable(test_identify tests/extract/test_identify.c)
 target_link_libraries(test_identify PRIVATE crimp)

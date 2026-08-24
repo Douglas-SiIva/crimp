@@ -52,7 +52,7 @@ int main(void) {
 
     crimp_scan_result result;
     crimp_scan_result_init(&result);
-    crimp_scan_directory(fixture_dir, NULL, &result);
+    crimp_scan_directory(fixture_dir, NULL, NULL, &result);
 
     int saw_finding = result.findings.count > 0;
 
@@ -82,20 +82,68 @@ int main(void) {
      * normally regardless. */
     crimp_scan_result bad_rules_result;
     crimp_scan_result_init(&bad_rules_result);
-    int rc = crimp_scan_directory(fixture_dir, "test_fixture_rules_dir_does_not_exist",
+    int rc = crimp_scan_directory(fixture_dir, "test_fixture_rules_dir_does_not_exist", NULL,
                                    &bad_rules_result);
     int still_worked = bad_rules_result.findings.count > 0;
     crimp_scan_result_free(&bad_rules_result);
-    if (rc == 0) {
+    if (!(rc & CRIMP_SCAN_RULES_FAILED) || (rc & CRIMP_SCAN_CVE_DATASET_FAILED)) {
         fprintf(stderr,
-                "FAIL: expected crimp_scan_directory to return nonzero when --rules points at "
-                "a directory that can't be opened\n");
+                "FAIL: expected exactly CRIMP_SCAN_RULES_FAILED when --rules points at a "
+                "directory that can't be opened (no --cve-dataset was even passed), got rc=%d\n",
+                rc);
         return 1;
     }
     if (!still_worked) {
         fprintf(stderr,
                 "FAIL: built-in detectors should still run normally even when the rules "
                 "directory can't be opened\n");
+        return 1;
+    }
+
+    /* Same contract, for a --cve-dataset path that can't be opened. */
+    crimp_scan_result bad_cve_result;
+    crimp_scan_result_init(&bad_cve_result);
+    int cve_rc = crimp_scan_directory(fixture_dir, NULL,
+                                       "test_fixture_cve_dataset_does_not_exist.yaml",
+                                       &bad_cve_result);
+    int cve_still_worked = bad_cve_result.components.count > 0;
+    crimp_scan_result_free(&bad_cve_result);
+    if (!(cve_rc & CRIMP_SCAN_CVE_DATASET_FAILED) || (cve_rc & CRIMP_SCAN_RULES_FAILED)) {
+        fprintf(stderr,
+                "FAIL: expected exactly CRIMP_SCAN_CVE_DATASET_FAILED when --cve-dataset points "
+                "at a file that can't be opened (no --rules was even passed), got rc=%d\n",
+                cve_rc);
+        return 1;
+    }
+    if (!cve_still_worked) {
+        fprintf(stderr,
+                "FAIL: built-in detectors/component identification should still run normally "
+                "even when the CVE dataset can't be opened\n");
+        return 1;
+    }
+
+    /* The precise regression this bitmask return value exists for: one
+     * good input and one bad input together must only flag the bad one -
+     * a single boolean-ish return value couldn't tell the CLI which of
+     * two independent optional inputs actually failed, so it warned about
+     * both, falsely telling the user a directory that loaded fine hadn't. */
+    const char *rules_dir = "test_fixture_rules_dir_for_mixed_check";
+#if defined(_WIN32)
+    _mkdir(rules_dir);
+#else
+    mkdir(rules_dir, 0755);
+#endif
+    crimp_scan_result mixed_result;
+    crimp_scan_result_init(&mixed_result);
+    int mixed_rc = crimp_scan_directory(fixture_dir, rules_dir,
+                                         "test_fixture_cve_dataset_does_not_exist.yaml",
+                                         &mixed_result);
+    crimp_scan_result_free(&mixed_result);
+    if ((mixed_rc & CRIMP_SCAN_RULES_FAILED) || !(mixed_rc & CRIMP_SCAN_CVE_DATASET_FAILED)) {
+        fprintf(stderr,
+                "FAIL: with a valid --rules dir and an invalid --cve-dataset path, expected "
+                "only CRIMP_SCAN_CVE_DATASET_FAILED, got rc=%d\n",
+                mixed_rc);
         return 1;
     }
 
