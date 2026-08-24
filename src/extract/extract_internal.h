@@ -37,6 +37,11 @@ const char *crimp_cramfs_compression_name(void);
 int crimp_cramfs_list(const char *path, crimp_fs_entry_list *out);
 int crimp_cramfs_extract(const char *path, const char *output_dir, crimp_fs_entry_list *out);
 
+int crimp_jffs2_identify(const char *path, crimp_fs_info *out);
+const char *crimp_jffs2_compression_name(void);
+int crimp_jffs2_list(const char *path, crimp_fs_entry_list *out);
+int crimp_jffs2_extract(const char *path, const char *output_dir, crimp_fs_entry_list *out);
+
 /* Returns 0 on success, -1 on a malformed image, an unsupported (compressed
  * metadata) image, or if `path` can't be read/isn't a SquashFS image. */
 int crimp_squashfs_list(const char *path, crimp_fs_entry_list *out);

@@ -33,6 +33,7 @@ add_library(crimp STATIC
     src/extract/fs_util.c
     src/extract/squashfs.c
     src/extract/cramfs.c
+    src/extract/jffs2.c
     src/detectors/weak_credentials.c
     src/detectors/exposed_protocols.c
     src/detectors/weak_crypto.c
@@ -145,6 +146,33 @@ add_executable(test_cramfs_synthetic tests/extract/test_cramfs_synthetic.c)
 target_include_directories(test_cramfs_synthetic PRIVATE src/extract)
 target_link_libraries(test_cramfs_synthetic PRIVATE crimp)
 add_test(NAME cramfs_synthetic COMMAND test_cramfs_synthetic)
+
+add_executable(test_jffs2_extract tests/extract/test_jffs2_extract.c)
+target_include_directories(test_jffs2_extract PRIVATE src/extract)
+target_link_libraries(test_jffs2_extract PRIVATE crimp)
+target_compile_definitions(test_jffs2_extract PRIVATE
+    FIXTURE_PATH="${CMAKE_SOURCE_DIR}/tests/fixtures/jffs2_extract.img"
+    OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/jffs2_extract_output")
+add_test(NAME jffs2_extract COMMAND test_jffs2_extract)
+
+add_executable(test_jffs2_endian tests/extract/test_jffs2_endian.c)
+target_include_directories(test_jffs2_endian PRIVATE src/extract)
+target_link_libraries(test_jffs2_endian PRIVATE crimp)
+add_test(NAME jffs2_endian COMMAND test_jffs2_endian)
+
+add_executable(test_jffs2_mutation_sweep tests/extract/test_jffs2_mutation_sweep.c)
+target_include_directories(test_jffs2_mutation_sweep PRIVATE src/extract)
+target_link_libraries(test_jffs2_mutation_sweep PRIVATE crimp)
+target_compile_definitions(test_jffs2_mutation_sweep PRIVATE
+    FIXTURE_PATH="${CMAKE_SOURCE_DIR}/tests/fixtures/jffs2_extract.img"
+    WORK_FILE="${CMAKE_CURRENT_BINARY_DIR}/jffs2_mutation_work.img"
+    OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/jffs2_mutation_output")
+add_test(NAME jffs2_mutation_sweep COMMAND test_jffs2_mutation_sweep)
+
+add_executable(test_jffs2_review_fixes tests/extract/test_jffs2_review_fixes.c)
+target_include_directories(test_jffs2_review_fixes PRIVATE src/extract)
+target_link_libraries(test_jffs2_review_fixes PRIVATE crimp ZLIB::ZLIB)
+add_test(NAME jffs2_review_fixes COMMAND test_jffs2_review_fixes)
 
 add_executable(test_squashfs_mutation_sweep_xz tests/extract/test_squashfs_mutation_sweep.c)
 target_include_directories(test_squashfs_mutation_sweep_xz PRIVATE src/extract)

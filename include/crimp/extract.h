@@ -11,6 +11,7 @@ typedef enum {
     CRIMP_FS_UNKNOWN = 0,
     CRIMP_FS_SQUASHFS,
     CRIMP_FS_CRAMFS,
+    CRIMP_FS_JFFS2,
 } crimp_fs_type;
 
 typedef struct {

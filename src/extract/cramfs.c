@@ -16,7 +16,7 @@
  *
  * The one thing squashfs.c never had to deal with: on-disk byte order isn't
  * fixed. A cramfs image built on a big-endian host is genuinely big-endian
- * on disk. Every multi-byte read below goes through decode_u32(), which
+ * on disk. Every multi-byte read below goes through crimp_fs_decode_u32(), which
  * takes the image's detected endianness explicitly - never assume host
  * order the way squashfs.c's #pragma-packed struct + plain fread() does
  * (safe there only because squashfs is always little-endian regardless of
@@ -36,15 +36,6 @@
 #define CRAMFS_S_IFDIR 0x4000u
 #define CRAMFS_S_IFREG 0x8000u
 
-static uint32_t decode_u32(const uint8_t *p, int big_endian) {
-    if (big_endian) {
-        return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) |
-               (uint32_t)p[3];
-    }
-    return ((uint32_t)p[3] << 24) | ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) |
-           (uint32_t)p[0];
-}
-
 typedef struct {
     uint32_t mode;
     uint32_t uid;
@@ -62,9 +53,9 @@ typedef struct {
  * raw bytes (see SKILL.md) - mode/uid in word0, size/gid in word1,
  * namelen(6 bits)/offset(26 bits) in word2. */
 static void decode_inode(const uint8_t *raw12, int big_endian, cramfs_inode *out) {
-    uint32_t w0 = decode_u32(raw12 + 0, big_endian);
-    uint32_t w1 = decode_u32(raw12 + 4, big_endian);
-    uint32_t w2 = decode_u32(raw12 + 8, big_endian);
+    uint32_t w0 = crimp_fs_decode_u32(raw12 + 0, big_endian);
+    uint32_t w1 = crimp_fs_decode_u32(raw12 + 4, big_endian);
+    uint32_t w2 = crimp_fs_decode_u32(raw12 + 8, big_endian);
     out->mode = w0 & 0xFFFFu;
     out->uid = (w0 >> 16) & 0xFFFFu;
     out->size = w1 & 0xFFFFFFu;
@@ -94,15 +85,15 @@ static int read_superblock(FILE *f, cramfs_super *sb) {
      * fsck.cramfs rejects a mismatch outright rather than guessing, same
      * posture applied here. */
     int big_endian;
-    if (decode_u32(raw, 0) == CRAMFS_MAGIC) {
+    if (crimp_fs_decode_u32(raw, 0) == CRAMFS_MAGIC) {
         big_endian = 0;
-    } else if (decode_u32(raw, 1) == CRAMFS_MAGIC) {
+    } else if (crimp_fs_decode_u32(raw, 1) == CRAMFS_MAGIC) {
         big_endian = 1;
     } else {
         return -1;
     }
 
-    sb->size = decode_u32(raw + 4, big_endian);
+    sb->size = crimp_fs_decode_u32(raw + 4, big_endian);
     sb->big_endian = big_endian;
     decode_inode(raw + CRAMFS_ROOT_INODE_OFFSET, big_endian, &sb->root);
 
@@ -201,7 +192,7 @@ static int extract_regular_file(FILE *f, const cramfs_super *sb, const cramfs_in
             ok = 0;
             break;
         }
-        uint32_t next = decode_u32(ptr_raw, sb->big_endian);
+        uint32_t next = crimp_fs_decode_u32(ptr_raw, sb->big_endian);
         ptr_pos += 4;
 
         /* A crafted image could set a decreasing/out-of-bounds pointer -
