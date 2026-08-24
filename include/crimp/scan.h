@@ -20,6 +20,15 @@ typedef struct {
 void crimp_scan_result_init(crimp_scan_result *result);
 void crimp_scan_result_free(crimp_scan_result *result);
 
+/* Bits in crimp_scan_directory()'s return value - which optional input
+ * failed, not just whether *something* did. Two independent optional
+ * inputs (rules_dir, cve_dataset_path) can each fail on their own; a
+ * single -1 sentinel couldn't tell a caller which one without probing the
+ * paths itself, so the caller (the CLI) knew to warn about a path that
+ * had actually loaded fine. */
+#define CRIMP_SCAN_RULES_FAILED (1 << 0)
+#define CRIMP_SCAN_CVE_DATASET_FAILED (1 << 1)
+
 /* Registers every built-in detector, runs them all against `root_path`, and
  * identifies components. This is the orchestration the CLI wraps with
  * argument parsing and printing — kept in the library so it's usable (and
@@ -33,13 +42,14 @@ void crimp_scan_result_free(crimp_scan_result *result);
  * appending any (component, CVE) matches to the same `result->findings`.
  * Pass NULL to skip CVE matching entirely.
  *
- * Returns 0 normally, or -1 if `rules_dir` or `cve_dataset_path` was given
- * but couldn't be opened/parsed (e.g. a typo'd path) - everything else
- * still ran and `result` is still fully populated with whatever it found,
- * but silently proceeding with an incomplete finding set when the user
- * asked for more would be a false sense of completeness in a security
- * scanner, so the caller gets a way to notice and warn about it instead of
- * that failure being invisible. */
+ * Returns 0 normally, or a bitwise-OR of CRIMP_SCAN_RULES_FAILED and/or
+ * CRIMP_SCAN_CVE_DATASET_FAILED if the corresponding path was given but
+ * couldn't be opened/parsed (e.g. a typo'd path) - everything else still
+ * ran and `result` is still fully populated with whatever it found, but
+ * silently proceeding with an incomplete finding set when the user asked
+ * for more would be a false sense of completeness in a security scanner,
+ * so the caller gets a way to notice and warn about *which* input failed
+ * instead of that failure being invisible or ambiguous. */
 int crimp_scan_directory(const char *root_path, const char *rules_dir,
                           const char *cve_dataset_path, crimp_scan_result *result);
 

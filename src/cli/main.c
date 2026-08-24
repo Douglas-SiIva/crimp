@@ -33,19 +33,18 @@ static void scan_directory(const char *root_path, const char *rules_dir,
                             const char *cve_dataset_path) {
     crimp_scan_result result;
     crimp_scan_result_init(&result);
-    if (crimp_scan_directory(root_path, rules_dir, cve_dataset_path, &result) != 0) {
-        if (rules_dir != NULL) {
-            fprintf(stderr,
-                    "warning: --rules directory '%s' could not be opened - no user-defined "
-                    "rules were loaded\n",
-                    rules_dir);
-        }
-        if (cve_dataset_path != NULL) {
-            fprintf(stderr,
-                    "warning: --cve-dataset '%s' could not be opened or parsed - no CVE "
-                    "matches were checked\n",
-                    cve_dataset_path);
-        }
+    int scan_rc = crimp_scan_directory(root_path, rules_dir, cve_dataset_path, &result);
+    if (scan_rc & CRIMP_SCAN_RULES_FAILED) {
+        fprintf(stderr,
+                "warning: --rules directory '%s' could not be opened - no user-defined "
+                "rules were loaded\n",
+                rules_dir);
+    }
+    if (scan_rc & CRIMP_SCAN_CVE_DATASET_FAILED) {
+        fprintf(stderr,
+                "warning: --cve-dataset '%s' could not be opened or parsed - no CVE "
+                "matches were checked\n",
+                cve_dataset_path);
     }
 
     printf("=== Findings (%zu) ===\n", result.findings.count);

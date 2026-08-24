@@ -32,3 +32,26 @@ yaml_node_t *crimp_yaml_mapping_get(yaml_document_t *doc, yaml_node_t *map_node,
     }
     return NULL;
 }
+
+void crimp_yaml_str_to_lower(char *s) {
+    for (; *s; s++) {
+        if (*s >= 'A' && *s <= 'Z') {
+            *s = (char)(*s - 'A' + 'a');
+        }
+    }
+}
+
+int crimp_yaml_parse_severity(const char *s, crimp_severity *out) {
+    if (strcmp(s, "low") == 0) {
+        *out = CRIMP_SEVERITY_LOW;
+    } else if (strcmp(s, "medium") == 0) {
+        *out = CRIMP_SEVERITY_MEDIUM;
+    } else if (strcmp(s, "high") == 0) {
+        *out = CRIMP_SEVERITY_HIGH;
+    } else if (strcmp(s, "critical") == 0) {
+        *out = CRIMP_SEVERITY_CRITICAL;
+    } else {
+        return -1;
+    }
+    return 0;
+}

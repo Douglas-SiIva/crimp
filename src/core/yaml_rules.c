@@ -52,29 +52,6 @@ static int rule_list_add(crimp_yaml_rule_list *list, char *id, char *pattern, ch
     return 0;
 }
 
-static int parse_severity(const char *s, crimp_severity *out) {
-    if (strcmp(s, "low") == 0) {
-        *out = CRIMP_SEVERITY_LOW;
-    } else if (strcmp(s, "medium") == 0) {
-        *out = CRIMP_SEVERITY_MEDIUM;
-    } else if (strcmp(s, "high") == 0) {
-        *out = CRIMP_SEVERITY_HIGH;
-    } else if (strcmp(s, "critical") == 0) {
-        *out = CRIMP_SEVERITY_CRITICAL;
-    } else {
-        return -1;
-    }
-    return 0;
-}
-
-static void str_to_lower(char *s) {
-    for (; *s; s++) {
-        if (*s >= 'A' && *s <= 'Z') {
-            *s = (char)(*s - 'A' + 'a');
-        }
-    }
-}
-
 /* Parses one rule entry (a YAML_MAPPING_NODE with id/pattern/description/
  * severity scalar keys) into a freshly heap-allocated crimp_yaml_rule,
  * appended to `out`. Returns 0 on success, -1 if any required field is
@@ -92,8 +69,8 @@ static int parse_rule_entry(yaml_document_t *doc, yaml_node_t *entry, crimp_yaml
      * it here rather than let it silently flood every scan with a finding
      * on every single file under that rule's id. */
     if (id && pattern && pattern[0] != '\0' && description && severity_str) {
-        str_to_lower(severity_str);
-        ok = (parse_severity(severity_str, &severity) == 0);
+        crimp_yaml_str_to_lower(severity_str);
+        ok = (crimp_yaml_parse_severity(severity_str, &severity) == 0);
     }
     free(severity_str);
 

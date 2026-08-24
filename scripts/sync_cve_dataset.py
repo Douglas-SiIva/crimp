@@ -96,7 +96,12 @@ def best_severity(cve):
         entries = metrics.get(key)
         if entries:
             sev = entries[0].get("baseSeverity")
-            if sev:
+            # CVSS v3+ allows a "NONE" baseSeverity for a 0.0-scored entry -
+            # not one of crimp's own low/medium/high/critical buckets, and
+            # not meaningfully actionable as a finding either. Treat it the
+            # same as no severity at all (skip the CVE) rather than writing
+            # a value the C matcher (src/core/cve_match.c) doesn't recognize.
+            if sev and sev.upper() != "NONE":
                 return sev.lower()
     return None
 

@@ -46,6 +46,14 @@ int main(void) {
                "        affected: \"==0.9.6d\"\n"
                "        severity: critical\n"
                "        description: exact version test\n"
+               "      - id: CVE-EMPTY-AFFECTED\n"
+               "        affected: \"\"\n"
+               "        severity: critical\n"
+               "        description: empty affected field must never match\n"
+               "      - id: CVE-UNKNOWN-SEVERITY\n"
+               "        affected: \"<9.9.9\"\n"
+               "        severity: apocalyptic\n"
+               "        description: unrecognized severity must still produce a finding\n"
                "  - name: BusyBox\n"
                "    cves:\n"
                "      - id: CVE-BUSYBOX-TEST\n"
@@ -275,6 +283,64 @@ int main(void) {
             fprintf(stderr,
                     "FAIL: expected a dataset missing the top-level 'components' key to be "
                     "rejected\n");
+            crimp_finding_list_free(&findings);
+            crimp_component_list_free(&comps);
+            return 1;
+        }
+        crimp_finding_list_free(&findings);
+        crimp_component_list_free(&comps);
+    }
+
+    /* 9. An empty `affected` field must never vacuously match every
+     * version - regression coverage for a real bug found by /code-review
+     * high: version_satisfies()'s condition loop does nothing for zero
+     * conditions, which (without an explicit guard) trivially returns
+     * "satisfied" for any version at all. */
+    {
+        crimp_component_list comps;
+        crimp_component_list_init(&comps);
+        add_component(&comps, "OpenSSL", "0.0.1", "a");    /* absurdly old */
+        add_component(&comps, "OpenSSL", "99.99.99", "b"); /* absurdly new */
+
+        crimp_finding_list findings;
+        crimp_finding_list_init(&findings);
+        crimp_cve_match_components(dataset_path, &comps, &findings);
+        if (find_finding(&findings, "CVE-EMPTY-AFFECTED") >= 0) {
+            fprintf(stderr,
+                    "FAIL: an empty 'affected' field must never match any version - it matched "
+                    "at least one\n");
+            crimp_finding_list_free(&findings);
+            crimp_component_list_free(&comps);
+            return 1;
+        }
+        crimp_finding_list_free(&findings);
+        crimp_component_list_free(&comps);
+    }
+
+    /* 10. An unrecognized severity string must still produce a finding
+     * (falls back to LOW) rather than silently dropping an otherwise-valid
+     * match - a missing finding with no diagnostic trail is a worse
+     * failure mode for a security scanner than one at an imprecise
+     * severity. */
+    {
+        crimp_component_list comps;
+        crimp_component_list_init(&comps);
+        add_component(&comps, "OpenSSL", "1.0.0", "a");
+
+        crimp_finding_list findings;
+        crimp_finding_list_init(&findings);
+        crimp_cve_match_components(dataset_path, &comps, &findings);
+        int idx = find_finding(&findings, "CVE-UNKNOWN-SEVERITY");
+        if (idx < 0) {
+            fprintf(stderr,
+                    "FAIL: expected a finding for CVE-UNKNOWN-SEVERITY despite its unrecognized "
+                    "severity string - it must fall back to LOW, not be dropped\n");
+            crimp_finding_list_free(&findings);
+            crimp_component_list_free(&comps);
+            return 1;
+        }
+        if (findings.items[idx].severity != CRIMP_SEVERITY_LOW) {
+            fprintf(stderr, "FAIL: expected CVE-UNKNOWN-SEVERITY to fall back to LOW severity\n");
             crimp_finding_list_free(&findings);
             crimp_component_list_free(&comps);
             return 1;
