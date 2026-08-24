@@ -425,7 +425,16 @@ static const jffs2_inode_rec *find_inode_meta(const inode_rec_list *inodes, uint
  * isize) - fragments claiming bytes past it are truncated to fit, matching
  * how a real reader treats a stale fragment left over from a since-shrunk
  * file (ftruncate-via-JFFS2_NODETYPE_INODE with isize < a previous
- * fragment's reach). */
+ * fragment's reach).
+ *
+ * `disk_path` reaching every fopen()/fwrite()/remove() below has already
+ * been through crimp_fs_path_component_is_safe() + crimp_fs_join_output_
+ * path() in visit_child() - the real sanitization, validated against
+ * deliberately crafted traversal images (see this session's fixture/fuzz
+ * coverage). SonarCloud's c:S2083 (BETA path-injection taint rule) doesn't
+ * recognize that as a taint-clearing boundary and flags every use
+ * downstream as a "leak" - false positive, same class already documented
+ * in squashfs.c/cramfs.c/fs_util.c. */
 static int extract_regular_file(FILE *f, uint32_t ino, uint32_t final_isize,
                                  const inode_rec_list *inodes, const char *disk_path) {
     if (crimp_fs_path_is_symlink(disk_path)) {
@@ -435,7 +444,7 @@ static int extract_regular_file(FILE *f, uint32_t ino, uint32_t final_isize,
         return -1;
     }
     if (final_isize == 0) {
-        FILE *out = fopen(disk_path, "wb"); // NOSONAR - see note on extract_regular_file's caller
+        FILE *out = fopen(disk_path, "wb"); // NOSONAR - see the c:S2083 note on this function's signature
         if (!out) {
             return -1;
         }
@@ -545,7 +554,7 @@ static int extract_regular_file(FILE *f, uint32_t ino, uint32_t final_isize,
         return -1;
     }
 
-    FILE *out = fopen(disk_path, "wb"); // NOSONAR - see note on this function's caller
+    FILE *out = fopen(disk_path, "wb"); // NOSONAR - see the c:S2083 note on this function's signature
     if (!out) {
         free(content);
         return -1;
@@ -554,7 +563,7 @@ static int extract_regular_file(FILE *f, uint32_t ino, uint32_t final_isize,
     fclose(out);
     free(content);
     if (written != final_isize) {
-        remove(disk_path);
+        remove(disk_path); // NOSONAR - see the c:S2083 note on this function's signature
         return -1;
     }
     return 0;
@@ -613,10 +622,14 @@ static int visit_child(jffs2_walk_context *ctx, const jffs2_dirent_rec *dirent,
 
     char child_path[1024];
     int n;
+    /* `dirent->name` was just validated by crimp_fs_path_component_is_safe()
+     * a few lines above - SonarCloud's c:S5145 (same BETA taint-analysis
+     * family as c:S2083) doesn't recognize that call as clearing the taint.
+     * NOSONAR */
     if (parent_path[0] == '\0') {
-        n = snprintf(child_path, sizeof(child_path), "%s", dirent->name);
+        n = snprintf(child_path, sizeof(child_path), "%s", dirent->name); // NOSONAR
     } else {
-        n = snprintf(child_path, sizeof(child_path), "%s/%s", parent_path, dirent->name);
+        n = snprintf(child_path, sizeof(child_path), "%s/%s", parent_path, dirent->name); // NOSONAR
     }
     if (n < 0 || (size_t)n >= sizeof(child_path)) {
         return -1;
