@@ -11,6 +11,22 @@
 #include <sys/stat.h>
 #endif
 
+uint32_t crimp_fs_decode_u32(const uint8_t *p, int big_endian) {
+    if (big_endian) {
+        return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) |
+               (uint32_t)p[3];
+    }
+    return ((uint32_t)p[3] << 24) | ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) |
+           (uint32_t)p[0];
+}
+
+uint16_t crimp_fs_decode_u16(const uint8_t *p, int big_endian) {
+    if (big_endian) {
+        return (uint16_t)(((uint32_t)p[0] << 8) | p[1]);
+    }
+    return (uint16_t)(((uint32_t)p[1] << 8) | p[0]);
+}
+
 int crimp_fs_seek64(FILE *f, uint64_t offset) {
 #if defined(_WIN32)
     return _fseeki64(f, (long long)offset, SEEK_SET);

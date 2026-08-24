@@ -49,28 +49,20 @@
 #define JFFS2_S_IFDIR 0x4000u
 #define JFFS2_S_IFREG 0x8000u
 
-static uint32_t decode_u32(const uint8_t *p, int big_endian) {
-    if (big_endian) {
-        return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) |
-               (uint32_t)p[3];
-    }
-    return ((uint32_t)p[3] << 24) | ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) |
-           (uint32_t)p[0];
-}
-
-static uint16_t decode_u16(const uint8_t *p, int big_endian) {
-    if (big_endian) {
-        return (uint16_t)(((uint32_t)p[0] << 8) | p[1]);
-    }
-    return (uint16_t)(((uint32_t)p[1] << 8) | p[0]);
-}
-
-/* One dirent node, as scanned from the log - `name` is owned. */
+/* One dirent node, as scanned from the log - `name` is owned. `name_len` is
+ * the true on-disk length (the number of bytes actually written, not
+ * strlen(name)) - a name can legally contain an embedded NUL byte on disk
+ * (nsize is a plain byte count, not a C-string length), and relying on
+ * strlen() anywhere below it would silently truncate that name to its
+ * pre-NUL prefix, defeating crimp_fs_path_component_is_safe()'s own
+ * embedded-NUL rejection (which only sees what length it's told) and
+ * letting two distinct on-disk entries compare/sort as identical. */
 typedef struct {
     uint32_t pino;
     uint32_t version;
     uint32_t ino; /* 0 means "this name was deleted" */
     char *name;
+    size_t name_len;
 } jffs2_dirent_rec;
 
 /* One inode (file-metadata+content-fragment) node, as scanned from the log.
@@ -126,6 +118,7 @@ static int dirent_list_add(dirent_list *list, uint32_t pino, uint32_t version, u
     r->version = version;
     r->ino = ino;
     r->name = name_copy;
+    r->name_len = name_len;
     return 0;
 }
 
@@ -185,7 +178,7 @@ static int find_next_node(FILE *f, uint64_t start, uint64_t image_size, int big_
             return -1;
         }
         for (size_t i = 0; i + 1 < got; i += 4) {
-            if (decode_u16(buf + i, big_endian) == JFFS2_MAGIC) {
+            if (crimp_fs_decode_u16(buf + i, big_endian) == JFFS2_MAGIC) {
                 *out_pos = pos + i;
                 return 0;
             }
@@ -224,7 +217,7 @@ static int scan_log(FILE *f, uint64_t image_size, int big_endian, dirent_list *d
             fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
             return -1;
         }
-        if (decode_u16(hdr, big_endian) != JFFS2_MAGIC) {
+        if (crimp_fs_decode_u16(hdr, big_endian) != JFFS2_MAGIC) {
             uint64_t next_pos;
             if (find_next_node(f, pos, image_size, big_endian, &next_pos) != 0) {
                 break; /* genuinely no more valid nodes: real end of log */
@@ -232,8 +225,8 @@ static int scan_log(FILE *f, uint64_t image_size, int big_endian, dirent_list *d
             pos = next_pos;
             continue;
         }
-        uint16_t nodetype = decode_u16(hdr + 2, big_endian);
-        uint32_t totlen = decode_u32(hdr + 4, big_endian);
+        uint16_t nodetype = crimp_fs_decode_u16(hdr + 2, big_endian);
+        uint32_t totlen = crimp_fs_decode_u32(hdr + 4, big_endian);
 
         /* A node can never be shorter than its own common header, and must
          * fit within the declared image size - reject rather than let a
@@ -250,9 +243,9 @@ static int scan_log(FILE *f, uint64_t image_size, int big_endian, dirent_list *d
             if (fread(fixed, 1, sizeof(fixed), f) != sizeof(fixed)) {
                 return -1;
             }
-            uint32_t pino = decode_u32(fixed + 0, big_endian);
-            uint32_t version = decode_u32(fixed + 4, big_endian);
-            uint32_t ino = decode_u32(fixed + 8, big_endian);
+            uint32_t pino = crimp_fs_decode_u32(fixed + 0, big_endian);
+            uint32_t version = crimp_fs_decode_u32(fixed + 4, big_endian);
+            uint32_t ino = crimp_fs_decode_u32(fixed + 8, big_endian);
             uint8_t nsize = fixed[16];
             uint32_t name_len_avail =
                 totlen - JFFS2_COMMON_HEADER_SIZE - JFFS2_DIRENT_FIXED_SIZE;
@@ -275,15 +268,15 @@ static int scan_log(FILE *f, uint64_t image_size, int big_endian, dirent_list *d
                 return -1;
             }
             jffs2_inode_rec rec;
-            rec.ino = decode_u32(fixed + 0, big_endian);
-            rec.version = decode_u32(fixed + 4, big_endian);
-            rec.mode = decode_u32(fixed + 8, big_endian);
+            rec.ino = crimp_fs_decode_u32(fixed + 0, big_endian);
+            rec.version = crimp_fs_decode_u32(fixed + 4, big_endian);
+            rec.mode = crimp_fs_decode_u32(fixed + 8, big_endian);
             /* uid(2)@12, gid(2)@14 - not needed for extraction */
-            rec.isize = decode_u32(fixed + 16, big_endian);
+            rec.isize = crimp_fs_decode_u32(fixed + 16, big_endian);
             /* atime/mtime/ctime (4 each)@20,24,28 - not needed */
-            rec.frag_offset = decode_u32(fixed + 32, big_endian);
-            rec.csize = decode_u32(fixed + 36, big_endian);
-            rec.dsize = decode_u32(fixed + 40, big_endian);
+            rec.frag_offset = crimp_fs_decode_u32(fixed + 32, big_endian);
+            rec.csize = crimp_fs_decode_u32(fixed + 36, big_endian);
+            rec.dsize = crimp_fs_decode_u32(fixed + 40, big_endian);
             rec.compr = fixed[44];
             /* usercompr@45, flags(2)@46, data_crc(4)@48, node_crc(4)@52 - not needed */
             rec.file_offset = pos + JFFS2_COMMON_HEADER_SIZE + JFFS2_INODE_FIXED_SIZE;
@@ -307,6 +300,22 @@ static int scan_log(FILE *f, uint64_t image_size, int big_endian, dirent_list *d
     return 0;
 }
 
+/* Length-aware name comparison - a plain strcmp() would stop at the first
+ * embedded NUL byte, making two genuinely different on-disk names (only
+ * their pre-NUL prefix in common) compare equal. Ordinary names (the
+ * overwhelming common case) behave identically to strcmp(). */
+static int dirent_name_cmp(const char *a, size_t alen, const char *b, size_t blen) {
+    size_t minlen = alen < blen ? alen : blen;
+    int c = memcmp(a, b, minlen);
+    if (c != 0) {
+        return c;
+    }
+    if (alen != blen) {
+        return alen < blen ? -1 : 1;
+    }
+    return 0;
+}
+
 /* Comparator: groups dirent records by (pino, name), highest version last
  * within each group. */
 static int dirent_cmp(const void *a, const void *b) {
@@ -315,7 +324,7 @@ static int dirent_cmp(const void *a, const void *b) {
     if (da->pino != db->pino) {
         return da->pino < db->pino ? -1 : 1;
     }
-    int name_cmp = strcmp(da->name, db->name);
+    int name_cmp = dirent_name_cmp(da->name, da->name_len, db->name, db->name_len);
     if (name_cmp != 0) {
         return name_cmp;
     }
@@ -337,16 +346,55 @@ static int inode_rec_cmp(const void *a, const void *b) {
     return 0;
 }
 
+/* Lower-bound binary search: both dirents and inodes are sorted primarily by
+ * (pino) / (ino) respectively, so every record for a given key occupies one
+ * contiguous run starting at the index this returns. Without this, every
+ * lookup by pino/ino degenerated into a full linear scan of the whole list -
+ * O(N) per call, and since a call happens once per directory entry visited
+ * (find_inode_meta, extract_regular_file's fragment loop) or once per
+ * directory (for_each_live_child's old pre-scan), the full walk of a crafted
+ * image with many flat siblings was O(N^2) overall - a real CPU-exhaustion
+ * DoS against a tool whose entire job is processing untrusted images (this
+ * was also the concrete cause of test_jffs2_mutation_sweep hanging/crawling
+ * during an earlier pass at this file, before its true root cause -
+ * extract_regular_file's uncapped final_isize allocation - was identified;
+ * both had to be fixed). */
+static size_t dirent_lower_bound(const dirent_list *dirents, uint32_t pino) {
+    size_t lo = 0, hi = dirents->count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (dirents->items[mid].pino < pino) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+static size_t inode_lower_bound(const inode_rec_list *inodes, uint32_t ino) {
+    size_t lo = 0, hi = inodes->count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (inodes->items[mid].ino < ino) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
 /* Finds the highest-version inode record for `ino` (its authoritative
  * mode/isize) - `inodes` must already be sorted by (ino, version). Returns
  * NULL if `ino` has no inode record at all (a malformed image - every real
  * inode must have written its own metadata at least once). */
 static const jffs2_inode_rec *find_inode_meta(const inode_rec_list *inodes, uint32_t ino) {
+    size_t i = inode_lower_bound(inodes, ino);
     const jffs2_inode_rec *best = NULL;
-    for (size_t i = 0; i < inodes->count; i++) {
-        if (inodes->items[i].ino == ino) {
-            best = &inodes->items[i]; /* sorted ascending by version - last match wins */
-        }
+    while (i < inodes->count && inodes->items[i].ino == ino) {
+        best = &inodes->items[i]; /* sorted ascending by version - last match wins */
+        i++;
     }
     return best;
 }
@@ -403,9 +451,19 @@ static int extract_regular_file(FILE *f, uint32_t ino, uint32_t final_isize,
     size_t comp_cap = 0;
     int ok = 1;
 
-    for (size_t i = 0; ok && i < inodes->count; i++) {
+    /* inodes is sorted by (ino, version), so every fragment for `ino` occupies
+     * one contiguous run - iterate just that run instead of the whole list
+     * (see dirent_lower_bound/inode_lower_bound's comment for why this
+     * matters: a full-list scan per file made the whole-image walk O(N^2)). */
+    size_t range_start = inode_lower_bound(inodes, ino);
+    size_t range_end = range_start;
+    while (range_end < inodes->count && inodes->items[range_end].ino == ino) {
+        range_end++;
+    }
+
+    for (size_t i = range_start; ok && i < range_end; i++) {
         const jffs2_inode_rec *rec = &inodes->items[i];
-        if (rec->ino != ino || rec->dsize == 0) {
+        if (rec->dsize == 0) {
             continue;
         }
         uint64_t end = (uint64_t)rec->frag_offset + rec->dsize;
@@ -430,6 +488,21 @@ static int extract_regular_file(FILE *f, uint32_t ino, uint32_t final_isize,
                 break;
             }
         } else if (rec->compr == JFFS2_COMPR_ZLIB) {
+            /* dsize (the claimed decompressed size) is a plain on-disk
+             * uint32_t with no relationship enforced to csize (the real
+             * compressed byte count, already bounded by data_avail in
+             * scan_log - it can't exceed the node's own on-disk size). A
+             * crafted node can declare a tiny csize but a dsize near
+             * UINT32_MAX - a classic zlib decompression-bomb shape - driving
+             * the malloc(rec->dsize) below to attempt a multi-GB allocation
+             * per node, independent of and before final_isize's own 256MiB
+             * cap is ever reached (that cap bounds the whole *file*, not one
+             * fragment's decompression buffer). Reject implausible fragments
+             * the same way final_isize already is. */
+            if (rec->dsize > JFFS2_MAX_EXTRACTED_FILE_SIZE) {
+                ok = 0;
+                break;
+            }
             if (rec->csize > comp_cap) {
                 uint8_t *grown = (uint8_t *)realloc(comp_buf, rec->csize);
                 if (!grown) {
@@ -509,15 +582,12 @@ static int for_each_live_child(jffs2_walk_context *ctx, uint32_t pino,
                                              const char *, int),
                                 const char *parent_path, int depth) {
     const dirent_list *d = ctx->dirents;
-    size_t i = 0;
-    while (i < d->count) {
-        if (d->items[i].pino != pino) {
-            i++;
-            continue;
-        }
+    size_t i = dirent_lower_bound(d, pino);
+    while (i < d->count && d->items[i].pino == pino) {
         size_t run_end = i + 1;
         while (run_end < d->count && d->items[run_end].pino == pino &&
-               strcmp(d->items[run_end].name, d->items[i].name) == 0) {
+               dirent_name_cmp(d->items[run_end].name, d->items[run_end].name_len,
+                                d->items[i].name, d->items[i].name_len) == 0) {
             run_end++;
         }
         const jffs2_dirent_rec *winner = &d->items[run_end - 1];
@@ -533,7 +603,7 @@ static int for_each_live_child(jffs2_walk_context *ctx, uint32_t pino,
 
 static int visit_child(jffs2_walk_context *ctx, const jffs2_dirent_rec *dirent,
                         const char *parent_path, int depth) {
-    if (!crimp_fs_path_component_is_safe(dirent->name, strlen(dirent->name))) {
+    if (!crimp_fs_path_component_is_safe(dirent->name, dirent->name_len)) {
         return -1;
     }
     const jffs2_inode_rec *meta = find_inode_meta(ctx->inodes, dirent->ino);
@@ -604,11 +674,11 @@ static int detect_endianness(FILE *f, int *out_big_endian) {
     if (crimp_fs_seek64(f, 0) != 0 || fread(magic_bytes, 1, 2, f) != 2) {
         return -1;
     }
-    if (decode_u16(magic_bytes, 0) == JFFS2_MAGIC) {
+    if (crimp_fs_decode_u16(magic_bytes, 0) == JFFS2_MAGIC) {
         *out_big_endian = 0;
         return 0;
     }
-    if (decode_u16(magic_bytes, 1) == JFFS2_MAGIC) {
+    if (crimp_fs_decode_u16(magic_bytes, 1) == JFFS2_MAGIC) {
         *out_big_endian = 1;
         return 0;
     }

@@ -169,6 +169,11 @@ target_compile_definitions(test_jffs2_mutation_sweep PRIVATE
     OUTPUT_DIR="${CMAKE_CURRENT_BINARY_DIR}/jffs2_mutation_output")
 add_test(NAME jffs2_mutation_sweep COMMAND test_jffs2_mutation_sweep)
 
+add_executable(test_jffs2_review_fixes tests/extract/test_jffs2_review_fixes.c)
+target_include_directories(test_jffs2_review_fixes PRIVATE src/extract)
+target_link_libraries(test_jffs2_review_fixes PRIVATE crimp ZLIB::ZLIB)
+add_test(NAME jffs2_review_fixes COMMAND test_jffs2_review_fixes)
+
 add_executable(test_squashfs_mutation_sweep_xz tests/extract/test_squashfs_mutation_sweep.c)
 target_include_directories(test_squashfs_mutation_sweep_xz PRIVATE src/extract)
 target_link_libraries(test_squashfs_mutation_sweep_xz PRIVATE crimp)

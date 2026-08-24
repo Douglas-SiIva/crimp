@@ -12,6 +12,15 @@
  * and a portable 64-bit seek. Originally squashfs-only; factored out once
  * cramfs needed the identical logic rather than a second copy. */
 
+/* Decodes a multi-byte field using the *image's* detected endianness, never
+ * the host's - cramfs and JFFS2 images can each be built on either a
+ * big-endian or little-endian host, and the on-disk byte order has to be
+ * read explicitly rather than assumed. Originally a cramfs-only static
+ * helper, duplicated verbatim into jffs2.c; factored out here once a second
+ * copy existed, same reasoning as the path/directory helpers below. */
+uint32_t crimp_fs_decode_u32(const uint8_t *p, int big_endian);
+uint16_t crimp_fs_decode_u16(const uint8_t *p, int big_endian);
+
 /* fseek() takes a `long` offset, which is only 32 bits under the LLP64
  * model MinGW targets on Windows (this project's documented Windows build)
  * - casting a 64-bit table offset into that truncates silently for offsets
