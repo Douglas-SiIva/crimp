@@ -32,6 +32,19 @@ typedef struct {
 } squashfs_superblock;
 #pragma pack(pop)
 
+/* Bundles the open image file and its already-parsed superblock - both
+ * invariant for the whole lifetime of a single list/extract call, and
+ * needed together at nearly every call site below (block_size and
+ * compression, in particular, always come from `sb`, never independently).
+ * Passing this instead of `f` + individual superblock fields keeps
+ * read_inode/read_and_inflate_block/write_data_block under SonarCloud's
+ * 7-parameter limit, the same idea walk_context already applies to
+ * walk_directory. */
+typedef struct {
+    FILE *f;
+    const squashfs_superblock *sb;
+} squashfs_io;
+
 static int read_superblock(FILE *f, squashfs_superblock *sb) {
     if (fseek(f, 0, SEEK_SET) != 0) {
         return -1;
@@ -465,11 +478,11 @@ static int read_symlink_fields(metadata_cursor *c, squashfs_inode *out) {
     return 0;
 }
 
-static int read_inode(FILE *f, uint64_t inode_table_start, uint64_t block_offset,
-                       uint16_t in_block_offset, uint64_t block_size, uint16_t compression,
+static int read_inode(const squashfs_io *io, uint64_t block_offset, uint16_t in_block_offset,
                        int want_content, squashfs_inode *out) {
     metadata_cursor c;
-    if (cursor_init(&c, f, inode_table_start + block_offset, in_block_offset, compression) != 0) {
+    if (cursor_init(&c, io->f, io->sb->inode_table_start + block_offset, in_block_offset,
+                     io->sb->compression) != 0) {
         return -1;
     }
 
@@ -502,10 +515,10 @@ static int read_inode(FILE *f, uint64_t inode_table_start, uint64_t block_offset
             rc = read_extended_dir_fields(&c, out);
             break;
         case 2:
-            rc = read_basic_file_fields(&c, block_size, want_content, out);
+            rc = read_basic_file_fields(&c, io->sb->block_size, want_content, out);
             break;
         case 9:
-            rc = read_extended_file_fields(&c, block_size, want_content, out);
+            rc = read_extended_file_fields(&c, io->sb->block_size, want_content, out);
             break;
         case 3:
         case 10:
@@ -591,18 +604,18 @@ static int read_fragment_entry(FILE *f, const squashfs_superblock *sb, uint32_t 
  * `offset`, of `size` bytes, decompressing it into `dest` (capacity
  * `dest_cap`, always sb->block_size - the decompression-bomb cap) unless
  * `compressed` is false. */
-static int read_and_inflate_block(FILE *f, uint64_t offset, uint32_t size, int compressed,
-                                   uint16_t compression, uint8_t *dest, uint32_t dest_cap,
+static int read_and_inflate_block(const squashfs_io *io, uint64_t offset, uint32_t size,
+                                   int compressed, uint8_t *dest, uint32_t dest_cap,
                                    uint32_t *dest_len) {
     if (size > dest_cap) {
         return -1;
     }
-    if (crimp_fs_seek64(f, offset) != 0) {
+    if (crimp_fs_seek64(io->f, offset) != 0) {
         return -1;
     }
 
     if (!compressed) {
-        if (fread(dest, 1, size, f) != size) {
+        if (fread(dest, 1, size, io->f) != size) {
             return -1;
         }
         *dest_len = size;
@@ -613,11 +626,11 @@ static int read_and_inflate_block(FILE *f, uint64_t offset, uint32_t size, int c
     if (!compressed_buf) {
         return -1;
     }
-    if (fread(compressed_buf, 1, size, f) != size) {
+    if (fread(compressed_buf, 1, size, io->f) != size) {
         free(compressed_buf);
         return -1;
     }
-    int rc = decompress_block(compression, dest, dest_cap, dest_len, compressed_buf, size);
+    int rc = decompress_block(io->sb->compression, dest, dest_cap, dest_len, compressed_buf, size);
     free(compressed_buf);
     return rc;
 }
@@ -627,9 +640,8 @@ static int read_and_inflate_block(FILE *f, uint64_t offset, uint32_t size, int c
  * decompressed length matches `expected_len` exactly. Split out of
  * extract_regular_file()'s loop so that function needs only one `break` on
  * failure, not two. */
-static int write_data_block(FILE *f, FILE *out, uint64_t block_offset, uint32_t raw,
-                             uint16_t compression, uint64_t expected_len, uint8_t *block_buf,
-                             uint32_t block_size) {
+static int write_data_block(const squashfs_io *io, FILE *out, uint64_t block_offset, uint32_t raw,
+                             uint64_t expected_len, uint8_t *block_buf) {
     uint32_t size = raw & 0xFFFFFFu;
     int compressed = (raw & (1u << 24)) == 0;
     uint32_t dest_len;
@@ -637,8 +649,8 @@ static int write_data_block(FILE *f, FILE *out, uint64_t block_offset, uint32_t 
         /* A hole (sparse block): file_size bytes of zero, nothing on disk. */
         memset(block_buf, 0, (size_t)expected_len);
         dest_len = (uint32_t)expected_len;
-    } else if (read_and_inflate_block(f, block_offset, size, compressed, compression, block_buf,
-                                       block_size, &dest_len) != 0) {
+    } else if (read_and_inflate_block(io, block_offset, size, compressed, block_buf,
+                                       io->sb->block_size, &dest_len) != 0) {
         return -1;
     }
     /* SonarCloud's c:S2083 (path-injection taint rule) flags this write as
@@ -662,6 +674,7 @@ static int write_data_block(FILE *f, FILE *out, uint64_t block_offset, uint32_t 
  * uses one, its tail slice of a shared fragment block. */
 static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
                                  const squashfs_inode *inode, const char *disk_path) {
+    const squashfs_io io = {f, sb};
     /* fopen("wb") follows symlinks - a symlink planted at this exact path
      * before extraction started (e.g. output_dir reused across runs, or
      * otherwise not fully attacker-free) would make it write through the
@@ -698,8 +711,8 @@ static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
             expected_len = inode->file_size - bytes_before;
         }
 
-        if (write_data_block(f, out, block_offset, inode->block_sizes[i], sb->compression,
-                              expected_len, block_buf, sb->block_size) != 0) {
+        if (write_data_block(&io, out, block_offset, inode->block_sizes[i], expected_len,
+                              block_buf) != 0) {
             ok = 0;
             break;
         }
@@ -715,8 +728,8 @@ static int extract_regular_file(FILE *f, const squashfs_superblock *sb,
         uint32_t frag_dest_len = 0;
         if (read_fragment_entry(f, sb, inode->frag_index, &frag_start, &frag_size,
                                  &frag_compressed) != 0 ||
-            read_and_inflate_block(f, frag_start, frag_size, frag_compressed, sb->compression,
-                                   block_buf, sb->block_size, &frag_dest_len) != 0) {
+            read_and_inflate_block(&io, frag_start, frag_size, frag_compressed, block_buf,
+                                    sb->block_size, &frag_dest_len) != 0) {
             ok = 0;
         } else if ((uint64_t)inode->frag_block_offset + tail_len > frag_dest_len) {
             ok = 0; /* fragment doesn't actually contain the claimed tail range */
@@ -826,8 +839,8 @@ static int process_dir_entry(const walk_context *ctx, metadata_cursor *c, uint64
 
     squashfs_inode child;
     int want_content = ctx->output_dir != NULL;
-    if (read_inode(ctx->f, ctx->sb->inode_table_start, start, offset, ctx->sb->block_size,
-                    ctx->sb->compression, want_content, &child) != 0) {
+    const squashfs_io io = {ctx->f, ctx->sb};
+    if (read_inode(&io, start, offset, want_content, &child) != 0) {
         return -1;
     }
 
@@ -948,8 +961,8 @@ int crimp_squashfs_list(const char *path, crimp_fs_entry_list *out) {
     uint16_t root_offset = (uint16_t)(sb.root_inode & 0xFFFF);
 
     squashfs_inode root;
-    if (read_inode(f, sb.inode_table_start, root_block, root_offset, sb.block_size, sb.compression,
-                    0, &root) != 0) {
+    const squashfs_io io = {f, &sb};
+    if (read_inode(&io, root_block, root_offset, 0, &root) != 0) {
         fclose(f);
         crimp_fs_entry_list_free(out);
         return -1;
@@ -1004,8 +1017,8 @@ int crimp_squashfs_extract(const char *path, const char *output_dir,
     uint16_t root_offset = (uint16_t)(sb.root_inode & 0xFFFF);
 
     squashfs_inode root;
-    if (read_inode(f, sb.inode_table_start, root_block, root_offset, sb.block_size, sb.compression,
-                    0, &root) != 0) {
+    const squashfs_io io = {f, &sb};
+    if (read_inode(&io, root_block, root_offset, 0, &root) != 0) {
         fclose(f);
         crimp_fs_entry_list_free(out);
         return -1;

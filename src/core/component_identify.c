@@ -263,7 +263,7 @@ static void scan_file(const char *path, void *userdata) {
          * Dropbear - see dropbear_version_fallback below - but it's a
          * real, independently useful improvement for markers that do
          * have their version directly adjacent at some occurrence.) */
-        while (search_len > 0) {
+        while (search_len > 0 && !matched) {
             const char *found = crimp_memfind(search_start, search_len, marker);
             if (!found) {
                 break;
@@ -276,11 +276,10 @@ static void scan_file(const char *path, void *userdata) {
                               COMPONENT_MARKERS[i].allow_letter_suffix);
             if (version[0] != '\0') {
                 matched = 1;
-                break;
+            } else {
+                search_start = found + 1;
+                search_len = (size_t)((buf + n) - search_start);
             }
-
-            search_start = found + 1;
-            search_len = (size_t)((buf + n) - search_start);
         }
 
         if (!matched && found_any && COMPONENT_MARKERS[i].dropbear_version_fallback) {

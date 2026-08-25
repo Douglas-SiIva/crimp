@@ -188,14 +188,15 @@ static int find_next_node(FILE *f, uint64_t start, uint64_t image_size, int big_
          * caught by a genuinely tiny fixture, not just a theoretical
          * concern) - fewer than 4 bytes can never contain another
          * 4-byte-aligned candidate anyway, so this is always the end of
-         * the search, not just of this chunk. */
-        if (got < 4) {
+         * the search, not just of this chunk. Combined with the
+         * short-read check (`got < want`, reached end of file): `pos`
+         * isn't used again once this loop exits either way, so skipping
+         * its advancement in the short-read case changes nothing
+         * observable. */
+        if (got < 4 || got < want) {
             break;
         }
         pos += ((uint64_t)got / 4) * 4;
-        if (got < want) {
-            break; /* short read: reached end of file */
-        }
     }
     return -1; /* genuinely no more valid nodes before image_size */
 }
@@ -208,6 +209,67 @@ static int find_next_node(FILE *f, uint64_t start, uint64_t image_size, int big_
  * truncated read) partway through otherwise-valid-looking data - a real
  * gap never has a stray valid-looking magic followed by a broken node, so
  * this distinction is safe in practice. */
+/* Parses one JFFS2_NODETYPE_DIRENT node's fixed fields + name (the common
+ * header at `pos` has already been read and length-validated by the
+ * caller) and appends it to `dirents`. Returns 0 on success, -1 on any
+ * malformed/truncated data. */
+static int parse_dirent_node(FILE *f, uint32_t totlen, int big_endian, dirent_list *dirents) {
+    if (totlen < JFFS2_COMMON_HEADER_SIZE + JFFS2_DIRENT_FIXED_SIZE) {
+        return -1;
+    }
+    uint8_t fixed[JFFS2_DIRENT_FIXED_SIZE];
+    if (fread(fixed, 1, sizeof(fixed), f) != sizeof(fixed)) {
+        return -1;
+    }
+    uint32_t pino = crimp_fs_decode_u32(fixed + 0, big_endian);
+    uint32_t version = crimp_fs_decode_u32(fixed + 4, big_endian);
+    uint32_t ino = crimp_fs_decode_u32(fixed + 8, big_endian);
+    uint8_t nsize = fixed[16];
+    uint32_t name_len_avail = totlen - JFFS2_COMMON_HEADER_SIZE - JFFS2_DIRENT_FIXED_SIZE;
+    if (nsize == 0 || nsize > name_len_avail || nsize > 255) {
+        return -1;
+    }
+    char name[256];
+    if (fread(name, 1, nsize, f) != nsize) {
+        return -1;
+    }
+    return dirent_list_add(dirents, pino, version, ino, name, nsize);
+}
+
+/* Parses one JFFS2_NODETYPE_INODE node's fixed fields (the common header
+ * at `pos` has already been read and length-validated by the caller) and
+ * appends it to `inodes`. Returns 0 on success, -1 on any
+ * malformed/truncated data. */
+static int parse_inode_node(FILE *f, uint64_t pos, uint32_t totlen, int big_endian,
+                             inode_rec_list *inodes) {
+    if (totlen < JFFS2_COMMON_HEADER_SIZE + JFFS2_INODE_FIXED_SIZE) {
+        return -1;
+    }
+    uint8_t fixed[JFFS2_INODE_FIXED_SIZE];
+    if (fread(fixed, 1, sizeof(fixed), f) != sizeof(fixed)) {
+        return -1;
+    }
+    jffs2_inode_rec rec;
+    rec.ino = crimp_fs_decode_u32(fixed + 0, big_endian);
+    rec.version = crimp_fs_decode_u32(fixed + 4, big_endian);
+    rec.mode = crimp_fs_decode_u32(fixed + 8, big_endian);
+    /* uid(2)@12, gid(2)@14 - not needed for extraction */
+    rec.isize = crimp_fs_decode_u32(fixed + 16, big_endian);
+    /* atime/mtime/ctime (4 each)@20,24,28 - not needed */
+    rec.frag_offset = crimp_fs_decode_u32(fixed + 32, big_endian);
+    rec.csize = crimp_fs_decode_u32(fixed + 36, big_endian);
+    rec.dsize = crimp_fs_decode_u32(fixed + 40, big_endian);
+    rec.compr = fixed[44];
+    /* usercompr@45, flags(2)@46, data_crc(4)@48, node_crc(4)@52 - not needed */
+    rec.file_offset = pos + JFFS2_COMMON_HEADER_SIZE + JFFS2_INODE_FIXED_SIZE;
+
+    uint32_t data_avail = totlen - JFFS2_COMMON_HEADER_SIZE - JFFS2_INODE_FIXED_SIZE;
+    if (rec.csize > data_avail) {
+        return -1;
+    }
+    return inode_rec_list_add(inodes, &rec);
+}
+
 static int scan_log(FILE *f, uint64_t image_size, int big_endian, dirent_list *dirents,
                      inode_rec_list *inodes) {
     uint64_t pos = 0;
@@ -236,56 +298,11 @@ static int scan_log(FILE *f, uint64_t image_size, int big_endian, dirent_list *d
         }
 
         if (nodetype == JFFS2_NODETYPE_DIRENT) {
-            if (totlen < JFFS2_COMMON_HEADER_SIZE + JFFS2_DIRENT_FIXED_SIZE) {
-                return -1;
-            }
-            uint8_t fixed[JFFS2_DIRENT_FIXED_SIZE];
-            if (fread(fixed, 1, sizeof(fixed), f) != sizeof(fixed)) {
-                return -1;
-            }
-            uint32_t pino = crimp_fs_decode_u32(fixed + 0, big_endian);
-            uint32_t version = crimp_fs_decode_u32(fixed + 4, big_endian);
-            uint32_t ino = crimp_fs_decode_u32(fixed + 8, big_endian);
-            uint8_t nsize = fixed[16];
-            uint32_t name_len_avail =
-                totlen - JFFS2_COMMON_HEADER_SIZE - JFFS2_DIRENT_FIXED_SIZE;
-            if (nsize == 0 || nsize > name_len_avail || nsize > 255) {
-                return -1;
-            }
-            char name[256];
-            if (fread(name, 1, nsize, f) != nsize) {
-                return -1;
-            }
-            if (dirent_list_add(dirents, pino, version, ino, name, nsize) != 0) {
+            if (parse_dirent_node(f, totlen, big_endian, dirents) != 0) {
                 return -1;
             }
         } else if (nodetype == JFFS2_NODETYPE_INODE) {
-            if (totlen < JFFS2_COMMON_HEADER_SIZE + JFFS2_INODE_FIXED_SIZE) {
-                return -1;
-            }
-            uint8_t fixed[JFFS2_INODE_FIXED_SIZE];
-            if (fread(fixed, 1, sizeof(fixed), f) != sizeof(fixed)) {
-                return -1;
-            }
-            jffs2_inode_rec rec;
-            rec.ino = crimp_fs_decode_u32(fixed + 0, big_endian);
-            rec.version = crimp_fs_decode_u32(fixed + 4, big_endian);
-            rec.mode = crimp_fs_decode_u32(fixed + 8, big_endian);
-            /* uid(2)@12, gid(2)@14 - not needed for extraction */
-            rec.isize = crimp_fs_decode_u32(fixed + 16, big_endian);
-            /* atime/mtime/ctime (4 each)@20,24,28 - not needed */
-            rec.frag_offset = crimp_fs_decode_u32(fixed + 32, big_endian);
-            rec.csize = crimp_fs_decode_u32(fixed + 36, big_endian);
-            rec.dsize = crimp_fs_decode_u32(fixed + 40, big_endian);
-            rec.compr = fixed[44];
-            /* usercompr@45, flags(2)@46, data_crc(4)@48, node_crc(4)@52 - not needed */
-            rec.file_offset = pos + JFFS2_COMMON_HEADER_SIZE + JFFS2_INODE_FIXED_SIZE;
-
-            uint32_t data_avail = totlen - JFFS2_COMMON_HEADER_SIZE - JFFS2_INODE_FIXED_SIZE;
-            if (rec.csize > data_avail) {
-                return -1;
-            }
-            if (inode_rec_list_add(inodes, &rec) != 0) {
+            if (parse_inode_node(f, pos, totlen, big_endian, inodes) != 0) {
                 return -1;
             }
         }
@@ -360,7 +377,8 @@ static int inode_rec_cmp(const void *a, const void *b) {
  * extract_regular_file's uncapped final_isize allocation - was identified;
  * both had to be fixed). */
 static size_t dirent_lower_bound(const dirent_list *dirents, uint32_t pino) {
-    size_t lo = 0, hi = dirents->count;
+    size_t lo = 0;
+    size_t hi = dirents->count;
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
         if (dirents->items[mid].pino < pino) {
@@ -373,7 +391,8 @@ static size_t dirent_lower_bound(const dirent_list *dirents, uint32_t pino) {
 }
 
 static size_t inode_lower_bound(const inode_rec_list *inodes, uint32_t ino) {
-    size_t lo = 0, hi = inodes->count;
+    size_t lo = 0;
+    size_t hi = inodes->count;
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
         if (inodes->items[mid].ino < ino) {
@@ -435,6 +454,82 @@ static const jffs2_inode_rec *find_inode_meta(const inode_rec_list *inodes, uint
  * recognize that as a taint-clearing boundary and flags every use
  * downstream as a "leak" - false positive, same class already documented
  * in squashfs.c/cramfs.c/fs_util.c. */
+/* Fills content[rec->frag_offset .. +usable) for an uncompressed fragment
+ * (JFFS2_COMPR_NONE). csize must equal dsize for this compressor (no
+ * compression means no length is negotiated); `usable` may be less than
+ * dsize when frag_offset+dsize spans past final_isize (a stale fragment
+ * from a since-shrunk file), in which case the fragment's remaining bytes
+ * on disk are skipped over rather than read. Returns 1 on success, 0 on
+ * any read failure or a csize/dsize mismatch. */
+static int fetch_fragment_none(FILE *f, const jffs2_inode_rec *rec, uint32_t usable,
+                                uint8_t *content) {
+    if (rec->csize != rec->dsize) {
+        return 0;
+    }
+    if (crimp_fs_seek64(f, rec->file_offset) != 0 ||
+        fread(content + rec->frag_offset, 1, usable, f) != usable) {
+        return 0;
+    }
+    if (usable < rec->dsize && crimp_fs_seek64(f, rec->file_offset + usable) != 0) {
+        return 0;
+    }
+    return 1;
+}
+
+/* Fills content[rec->frag_offset .. +usable) for a zlib-compressed
+ * fragment (JFFS2_COMPR_ZLIB). `*comp_buf`/`*comp_cap` are a caller-owned
+ * scratch buffer for the compressed bytes, grown (never shrunk) as needed
+ * across calls. dsize needs its own decompression-bomb cap independent of
+ * final_isize's own (a crafted node can declare a tiny, valid csize but a
+ * dsize near UINT32_MAX, driving malloc(rec->dsize) below to attempt a
+ * multi-GB allocation per fragment, before final_isize's whole-file cap is
+ * ever reached). Returns 1 on success, 0 on any read/decompression
+ * failure, a size mismatch, or an implausible dsize. */
+static int fetch_fragment_zlib(FILE *f, const jffs2_inode_rec *rec, uint32_t usable,
+                                uint8_t *content, uint8_t **comp_buf, size_t *comp_cap) {
+    if (rec->dsize > JFFS2_MAX_EXTRACTED_FILE_SIZE) {
+        return 0;
+    }
+    if (rec->csize > *comp_cap) {
+        uint8_t *grown = (uint8_t *)realloc(*comp_buf, rec->csize);
+        if (!grown) {
+            return 0;
+        }
+        *comp_buf = grown;
+        *comp_cap = rec->csize;
+    }
+    uint8_t *decomp_buf = (uint8_t *)malloc(rec->dsize);
+    if (!decomp_buf) {
+        return 0;
+    }
+    uLongf out_len = rec->dsize;
+    if (crimp_fs_seek64(f, rec->file_offset) != 0 ||
+        fread(*comp_buf, 1, rec->csize, f) != rec->csize ||
+        uncompress(decomp_buf, &out_len, *comp_buf, rec->csize) != Z_OK || out_len != rec->dsize) {
+        free(decomp_buf);
+        return 0;
+    }
+    memcpy(content + rec->frag_offset, decomp_buf, usable);
+    free(decomp_buf);
+    return 1;
+}
+
+/* Fills content[rec->frag_offset .. +usable) for one fragment, dispatching
+ * by rec->compr. Returns 1 on success, 0 on failure or an unsupported
+ * compressor (rtime, lzo, ... - not implemented, real firmware
+ * overwhelmingly uses none or zlib per mkfs.jffs2's own default priority
+ * order - see SKILL.md). */
+static int fetch_fragment(FILE *f, const jffs2_inode_rec *rec, uint32_t usable, uint8_t *content,
+                           uint8_t **comp_buf, size_t *comp_cap) {
+    if (rec->compr == JFFS2_COMPR_NONE) {
+        return fetch_fragment_none(f, rec, usable, content);
+    }
+    if (rec->compr == JFFS2_COMPR_ZLIB) {
+        return fetch_fragment_zlib(f, rec, usable, content, comp_buf, comp_cap);
+    }
+    return 0;
+}
+
 static int extract_regular_file(FILE *f, uint32_t ino, uint32_t final_isize,
                                  const inode_rec_list *inodes, const char *disk_path) {
     if (crimp_fs_path_is_symlink(disk_path)) {
@@ -481,70 +576,8 @@ static int extract_regular_file(FILE *f, uint32_t ino, uint32_t final_isize,
         }
         uint32_t usable = (end > final_isize) ? (final_isize - rec->frag_offset) : rec->dsize;
 
-        if (rec->compr == JFFS2_COMPR_NONE) {
-            if (rec->csize != rec->dsize) {
-                ok = 0;
-                break;
-            }
-            if (crimp_fs_seek64(f, rec->file_offset) != 0 ||
-                fread(content + rec->frag_offset, 1, usable, f) != usable) {
-                ok = 0;
-                break;
-            }
-            if (usable < rec->dsize &&
-                crimp_fs_seek64(f, rec->file_offset + usable) != 0) {
-                ok = 0;
-                break;
-            }
-        } else if (rec->compr == JFFS2_COMPR_ZLIB) {
-            /* dsize (the claimed decompressed size) is a plain on-disk
-             * uint32_t with no relationship enforced to csize (the real
-             * compressed byte count, already bounded by data_avail in
-             * scan_log - it can't exceed the node's own on-disk size). A
-             * crafted node can declare a tiny csize but a dsize near
-             * UINT32_MAX - a classic zlib decompression-bomb shape - driving
-             * the malloc(rec->dsize) below to attempt a multi-GB allocation
-             * per node, independent of and before final_isize's own 256MiB
-             * cap is ever reached (that cap bounds the whole *file*, not one
-             * fragment's decompression buffer). Reject implausible fragments
-             * the same way final_isize already is. */
-            if (rec->dsize > JFFS2_MAX_EXTRACTED_FILE_SIZE) {
-                ok = 0;
-                break;
-            }
-            if (rec->csize > comp_cap) {
-                uint8_t *grown = (uint8_t *)realloc(comp_buf, rec->csize);
-                if (!grown) {
-                    ok = 0;
-                    break;
-                }
-                comp_buf = grown;
-                comp_cap = rec->csize;
-            }
-            uint8_t *decomp_buf = (uint8_t *)malloc(rec->dsize);
-            if (!decomp_buf) {
-                ok = 0;
-                break;
-            }
-            uLongf out_len = rec->dsize;
-            if (crimp_fs_seek64(f, rec->file_offset) != 0 ||
-                fread(comp_buf, 1, rec->csize, f) != rec->csize ||
-                uncompress(decomp_buf, &out_len, comp_buf, rec->csize) != Z_OK ||
-                out_len != rec->dsize) {
-                free(decomp_buf);
-                ok = 0;
-                break;
-            }
-            memcpy(content + rec->frag_offset, decomp_buf, usable);
-            free(decomp_buf);
-        } else {
-            /* Any other compressor (rtime, lzo, ...): not implemented -
-             * real firmware overwhelmingly uses none or zlib (mkfs.jffs2's
-             * own default priority order picks zlib over the weaker
-             * built-in compressors whenever it actually helps - see
-             * SKILL.md). Fail cleanly rather than misparse. */
+        if (!fetch_fragment(f, rec, usable, content, &comp_buf, &comp_cap)) {
             ok = 0;
-            break;
         }
     }
 
@@ -600,10 +633,8 @@ static int for_each_live_child(jffs2_walk_context *ctx, uint32_t pino,
             run_end++;
         }
         const jffs2_dirent_rec *winner = &d->items[run_end - 1];
-        if (winner->ino != 0) {
-            if (visit(ctx, winner, parent_path, depth) != 0) {
-                return -1;
-            }
+        if (winner->ino != 0 && visit(ctx, winner, parent_path, depth) != 0) {
+            return -1;
         }
         i = run_end;
     }

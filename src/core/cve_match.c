@@ -86,6 +86,49 @@ static int version_compare(const char *a, const char *b) {
 
 typedef enum { OP_LT, OP_LE, OP_GT, OP_GE, OP_EQ } range_op;
 
+/* Parses one leading comparison operator (<=, >=, ==, <, >) from `p` into
+ * `*op`, returning the position right after it - or NULL if `p` doesn't
+ * start with a recognized operator, so the caller can fail closed. */
+static const char *parse_op(const char *p, range_op *op) {
+    if (p[0] == '<' && p[1] == '=') {
+        *op = OP_LE;
+        return p + 2;
+    }
+    if (p[0] == '>' && p[1] == '=') {
+        *op = OP_GE;
+        return p + 2;
+    }
+    if (p[0] == '=' && p[1] == '=') {
+        *op = OP_EQ;
+        return p + 2;
+    }
+    if (p[0] == '<') {
+        *op = OP_LT;
+        return p + 1;
+    }
+    if (p[0] == '>') {
+        *op = OP_GT;
+        return p + 1;
+    }
+    return NULL;
+}
+
+/* Whether `cmp` (a version_compare() result) satisfies `op`. */
+static int op_holds(range_op op, int cmp) {
+    switch (op) {
+        case OP_LT:
+            return cmp < 0;
+        case OP_LE:
+            return cmp <= 0;
+        case OP_GT:
+            return cmp > 0;
+        case OP_GE:
+            return cmp >= 0;
+        default:
+            return cmp == 0;
+    }
+}
+
 /* Evaluates one comma-separated `affected` condition list (see cve.h)
  * against `version` - every condition must hold (AND). A malformed
  * condition (bad operator, empty version token) makes the whole list
@@ -107,22 +150,8 @@ static int version_satisfies(const char *version, const char *affected) {
             p++;
         }
         range_op op;
-        if (p[0] == '<' && p[1] == '=') {
-            op = OP_LE;
-            p += 2;
-        } else if (p[0] == '>' && p[1] == '=') {
-            op = OP_GE;
-            p += 2;
-        } else if (p[0] == '=' && p[1] == '=') {
-            op = OP_EQ;
-            p += 2;
-        } else if (p[0] == '<') {
-            op = OP_LT;
-            p += 1;
-        } else if (p[0] == '>') {
-            op = OP_GT;
-            p += 1;
-        } else {
+        p = parse_op(p, &op);
+        if (!p) {
             return 0;
         }
 
@@ -142,26 +171,7 @@ static int version_satisfies(const char *version, const char *affected) {
         }
         verbuf[i] = '\0';
 
-        int cmp = version_compare(version, verbuf);
-        int ok;
-        switch (op) {
-            case OP_LT:
-                ok = cmp < 0;
-                break;
-            case OP_LE:
-                ok = cmp <= 0;
-                break;
-            case OP_GT:
-                ok = cmp > 0;
-                break;
-            case OP_GE:
-                ok = cmp >= 0;
-                break;
-            default:
-                ok = cmp == 0;
-                break;
-        }
-        if (!ok) {
+        if (!op_holds(op, version_compare(version, verbuf))) {
             return 0;
         }
         if (*p == ',') {
@@ -230,8 +240,8 @@ static void match_component_entry(yaml_document_t *doc, yaml_node_t *dataset_com
     if (!dataset_component || dataset_component->type != YAML_MAPPING_NODE) {
         return;
     }
-    yaml_node_t *name_node = crimp_yaml_mapping_get(doc, dataset_component, "name");
-    yaml_node_t *cves_node = crimp_yaml_mapping_get(doc, dataset_component, "cves");
+    const yaml_node_t *name_node = crimp_yaml_mapping_get(doc, dataset_component, "name");
+    const yaml_node_t *cves_node = crimp_yaml_mapping_get(doc, dataset_component, "cves");
     char *name = crimp_yaml_dup_scalar(name_node);
     if (!name || !cves_node || cves_node->type != YAML_SEQUENCE_NODE) {
         free(name);
@@ -245,7 +255,7 @@ static void match_component_entry(yaml_document_t *doc, yaml_node_t *dataset_com
      * component in several statically-linked binaries, the original
      * per-instance-outer loop scaled matching cost as O(instances x CVEs)
      * instead of O(instances + CVEs). */
-    for (yaml_node_item_t *item = cves_node->data.sequence.items.start;
+    for (const yaml_node_item_t *item = cves_node->data.sequence.items.start;
          item < cves_node->data.sequence.items.top; item++) {
         yaml_node_t *cve_entry = yaml_document_get_node(doc, *item);
         match_cve_entry(doc, cve_entry, components, name, out);
@@ -276,13 +286,13 @@ int crimp_cve_match_components(const char *dataset_path, const crimp_component_l
     }
 
     yaml_node_t *root = yaml_document_get_root_node(&doc);
-    yaml_node_t *components_node = crimp_yaml_mapping_get(&doc, root, "components");
+    const yaml_node_t *components_node = crimp_yaml_mapping_get(&doc, root, "components");
     if (!components_node || components_node->type != YAML_SEQUENCE_NODE) {
         yaml_document_delete(&doc);
         return -1;
     }
 
-    for (yaml_node_item_t *item = components_node->data.sequence.items.start;
+    for (const yaml_node_item_t *item = components_node->data.sequence.items.start;
          item < components_node->data.sequence.items.top; item++) {
         yaml_node_t *entry = yaml_document_get_node(&doc, *item);
         match_component_entry(&doc, entry, components, out);

@@ -19,7 +19,8 @@ char *crimp_yaml_dup_scalar(const yaml_node_t *node);
 
 /* Finds `key` among a YAML_MAPPING_NODE's pairs and returns its value node,
  * or NULL if `map_node` isn't a mapping or has no such key. */
-yaml_node_t *crimp_yaml_mapping_get(yaml_document_t *doc, yaml_node_t *map_node, const char *key);
+yaml_node_t *crimp_yaml_mapping_get(yaml_document_t *doc, const yaml_node_t *map_node,
+                                     const char *key);
 
 /* ASCII-only, in place - deliberately not locale-dependent tolower(). */
 void crimp_yaml_str_to_lower(char *s);

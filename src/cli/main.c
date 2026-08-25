@@ -118,21 +118,25 @@ int main(int argc, char **argv) {
     const char *target = NULL;
     const char *rules_dir = NULL;
     const char *cve_dataset_path = NULL;
-    for (int i = 1; i < argc; i++) {
+    int i = 1;
+    while (i < argc) {
         if (strcmp(argv[i], "--rules") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "%s: --rules requires a directory argument\n", argv[0]);
                 return 1;
             }
-            rules_dir = argv[++i];
+            rules_dir = argv[i + 1];
+            i += 2;
         } else if (strcmp(argv[i], "--cve-dataset") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "%s: --cve-dataset requires a file argument\n", argv[0]);
                 return 1;
             }
-            cve_dataset_path = argv[++i];
+            cve_dataset_path = argv[i + 1];
+            i += 2;
         } else if (target == NULL) {
             target = argv[i];
+            i += 1;
         } else {
             target = NULL; /* more than one positional argument: usage error below */
             break;

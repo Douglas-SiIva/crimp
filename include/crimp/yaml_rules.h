@@ -49,7 +49,7 @@ void crimp_yaml_rule_list_free(crimp_yaml_rule_list *list);
  * 0 on success, -1 otherwise (including if `path` can't be opened). */
 int crimp_yaml_rules_load_file(const char *path, crimp_yaml_rule_list *out);
 
-/* Loads every top-level *.yaml/*.yml file directly inside `dir_path` (not
+/* Loads every top-level *.yaml or *.yml file directly inside `dir_path` (not
  * recursive) into `out`, best-effort: a file that fails to parse is
  * skipped, not fatal to the others. Returns 0 if `dir_path` itself could be
  * opened (even if it contained zero rule files, or every file in it failed

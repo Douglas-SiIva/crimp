@@ -7,6 +7,8 @@
 #if defined(_WIN32)
 #include <direct.h>
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 int crimp_fs_identify(const char *path, crimp_fs_info *out) {

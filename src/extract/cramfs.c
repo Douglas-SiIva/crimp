@@ -157,6 +157,58 @@ static int walk_directory(cramfs_walk_context *ctx, uint64_t offset, uint32_t si
  * c:S2083 (BETA path-injection taint rule) doesn't recognize that as a
  * taint-clearing boundary and flags every use downstream as a "leak" -
  * false positive, same class already documented in squashfs.c/fs_util.c. */
+/* Reads the next block pointer at `*ptr_pos` (advancing it by 4) and
+ * validates it against `prev_end`/`sb->size` - a crafted image could set a
+ * decreasing/out-of-bounds pointer, which must be rejected before ever
+ * computing a length via subtraction (that would otherwise underflow to a
+ * huge unsigned value). Returns 1 and fills `*next_out` on success, 0 on
+ * any read/validation failure. */
+static int read_block_pointer(FILE *f, const cramfs_super *sb, uint64_t *ptr_pos,
+                               uint64_t prev_end, uint32_t *next_out) {
+    uint8_t ptr_raw[4];
+    if (crimp_fs_seek64(f, *ptr_pos) != 0 || fread(ptr_raw, 1, 4, f) != 4) {
+        return 0;
+    }
+    uint32_t next = crimp_fs_decode_u32(ptr_raw, sb->big_endian);
+    *ptr_pos += 4;
+    if (next < prev_end || next > sb->size) {
+        return 0;
+    }
+    *next_out = next;
+    return 1;
+}
+
+/* Fills `block_buf` (CRAMFS_BLOCK_SIZE bytes) with the block spanning
+ * [prev_end, next) - a zero-filled "hole" if the span is empty, or the
+ * zlib-decompressed span otherwise. `*comp_buf`/`*comp_cap` are a
+ * caller-owned scratch buffer, grown (never shrunk) as needed across
+ * calls. Returns 1 on success, 0 on any read/decompression failure or
+ * size mismatch. */
+static int fetch_block(FILE *f, uint8_t *block_buf, uint32_t expected_len, uint64_t prev_end,
+                        uint32_t next, uint8_t **comp_buf, size_t *comp_cap) {
+    uint64_t comp_len = next - prev_end;
+    if (comp_len == 0) {
+        memset(block_buf, 0, expected_len); /* hole */
+        return 1;
+    }
+    if (comp_len > *comp_cap) {
+        uint8_t *grown = (uint8_t *)realloc(*comp_buf, comp_len);
+        if (!grown) {
+            return 0;
+        }
+        *comp_buf = grown;
+        *comp_cap = comp_len;
+    }
+    uLongf out_len = CRAMFS_BLOCK_SIZE;
+    if (crimp_fs_seek64(f, prev_end) != 0 ||
+        fread(*comp_buf, 1, (size_t)comp_len, f) != (size_t)comp_len ||
+        uncompress(block_buf, &out_len, *comp_buf, (uLong)comp_len) != Z_OK ||
+        out_len != expected_len) {
+        return 0;
+    }
+    return 1;
+}
+
 static int extract_regular_file(FILE *f, const cramfs_super *sb, const cramfs_inode *inode,
                                  const char *disk_path) {
     if (crimp_fs_path_is_symlink(disk_path)) {
@@ -183,22 +235,12 @@ static int extract_regular_file(FILE *f, const cramfs_super *sb, const cramfs_in
     size_t comp_cap = 0;
     int ok = 1;
     uint64_t ptr_pos = inode->offset;
-    uint64_t prev_end = inode->offset + 4ull * nblocks;
+    uint64_t prev_end = inode->offset + 4ULL * nblocks;
     uint64_t bytes_written = 0;
 
     for (uint32_t i = 0; ok && i < nblocks; i++) {
-        uint8_t ptr_raw[4];
-        if (crimp_fs_seek64(f, ptr_pos) != 0 || fread(ptr_raw, 1, 4, f) != 4) {
-            ok = 0;
-            break;
-        }
-        uint32_t next = crimp_fs_decode_u32(ptr_raw, sb->big_endian);
-        ptr_pos += 4;
-
-        /* A crafted image could set a decreasing/out-of-bounds pointer -
-         * reject before ever computing a length via subtraction (which
-         * would otherwise underflow to a huge unsigned value). */
-        if (next < prev_end || next > sb->size) {
+        uint32_t next;
+        if (!read_block_pointer(f, sb, &ptr_pos, prev_end, &next)) {
             ok = 0;
             break;
         }
@@ -208,30 +250,8 @@ static int extract_regular_file(FILE *f, const cramfs_super *sb, const cramfs_in
             expected_len = (uint32_t)(inode->size - bytes_written);
         }
 
-        uint64_t comp_len = next - prev_end;
-        if (comp_len == 0) {
-            memset(block_buf, 0, expected_len); /* hole */
-        } else {
-            if (comp_len > comp_cap) {
-                uint8_t *grown = (uint8_t *)realloc(comp_buf, comp_len);
-                if (!grown) {
-                    ok = 0;
-                    break;
-                }
-                comp_buf = grown;
-                comp_cap = comp_len;
-            }
-            uLongf out_len = CRAMFS_BLOCK_SIZE;
-            if (crimp_fs_seek64(f, prev_end) != 0 ||
-                fread(comp_buf, 1, (size_t)comp_len, f) != (size_t)comp_len ||
-                uncompress(block_buf, &out_len, comp_buf, (uLong)comp_len) != Z_OK ||
-                out_len != expected_len) {
-                ok = 0;
-                break;
-            }
-        }
-
-        if (fwrite(block_buf, 1, expected_len, out) != expected_len) {
+        if (!fetch_block(f, block_buf, expected_len, prev_end, next, &comp_buf, &comp_cap) ||
+            fwrite(block_buf, 1, expected_len, out) != expected_len) {
             ok = 0;
             break;
         }
