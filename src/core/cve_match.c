@@ -188,7 +188,7 @@ static int version_satisfies(const char *version, const char *affected) {
  * Parsed once per dataset CVE entry (not once per matching runtime
  * component instance - see match_component_entry) and checked against
  * every instance in `components` sharing `dataset_component_name`. */
-static void match_cve_entry(yaml_document_t *doc, yaml_node_t *cve_entry,
+static void match_cve_entry(yaml_document_t *doc, const yaml_node_t *cve_entry,
                              const crimp_component_list *components,
                              const char *dataset_component_name, crimp_finding_list *out) {
     if (!cve_entry || cve_entry->type != YAML_MAPPING_NODE) {
@@ -234,7 +234,7 @@ static void match_cve_entry(yaml_document_t *doc, yaml_node_t *cve_entry,
     free(description);
 }
 
-static void match_component_entry(yaml_document_t *doc, yaml_node_t *dataset_component,
+static void match_component_entry(yaml_document_t *doc, const yaml_node_t *dataset_component,
                                    const crimp_component_list *components,
                                    crimp_finding_list *out) {
     if (!dataset_component || dataset_component->type != YAML_MAPPING_NODE) {
@@ -285,7 +285,7 @@ int crimp_cve_match_components(const char *dataset_path, const crimp_component_l
         return -1;
     }
 
-    yaml_node_t *root = yaml_document_get_root_node(&doc);
+    const yaml_node_t *root = yaml_document_get_root_node(&doc);
     const yaml_node_t *components_node = crimp_yaml_mapping_get(&doc, root, "components");
     if (!components_node || components_node->type != YAML_SEQUENCE_NODE) {
         yaml_document_delete(&doc);

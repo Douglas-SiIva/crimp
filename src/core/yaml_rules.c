@@ -57,7 +57,8 @@ static int rule_list_add(crimp_yaml_rule_list *list, char *id, char *pattern, ch
  * appended to `out`. Returns 0 on success, -1 if any required field is
  * missing, the wrong node type, or an unrecognized severity value -
  * nothing is left partially allocated on failure. */
-static int parse_rule_entry(yaml_document_t *doc, yaml_node_t *entry, crimp_yaml_rule_list *out) {
+static int parse_rule_entry(yaml_document_t *doc, const yaml_node_t *entry,
+                             crimp_yaml_rule_list *out) {
     char *id = crimp_yaml_dup_scalar(crimp_yaml_mapping_get(doc, entry, "id"));
     char *pattern = crimp_yaml_dup_scalar(crimp_yaml_mapping_get(doc, entry, "pattern"));
     char *description = crimp_yaml_dup_scalar(crimp_yaml_mapping_get(doc, entry, "description"));
@@ -110,7 +111,7 @@ int crimp_yaml_rules_load_file(const char *path, crimp_yaml_rule_list *out) {
         return -1;
     }
 
-    yaml_node_t *root = yaml_document_get_root_node(&doc);
+    const yaml_node_t *root = yaml_document_get_root_node(&doc);
     const yaml_node_t *rules_node = crimp_yaml_mapping_get(&doc, root, "rules");
     if (!rules_node || rules_node->type != YAML_SEQUENCE_NODE) {
         yaml_document_delete(&doc);

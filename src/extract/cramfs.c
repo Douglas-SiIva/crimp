@@ -238,11 +238,13 @@ static int extract_regular_file(FILE *f, const cramfs_super *sb, const cramfs_in
     uint64_t prev_end = inode->offset + 4ULL * nblocks;
     uint64_t bytes_written = 0;
 
-    for (uint32_t i = 0; ok && i < nblocks; i++) {
+    uint32_t i = 0;
+    while (ok && i < nblocks) {
+        i++;
         uint32_t next;
         if (!read_block_pointer(f, sb, &ptr_pos, prev_end, &next)) {
             ok = 0;
-            break;
+            continue;
         }
 
         uint32_t expected_len = CRAMFS_BLOCK_SIZE;
@@ -253,7 +255,7 @@ static int extract_regular_file(FILE *f, const cramfs_super *sb, const cramfs_in
         if (!fetch_block(f, block_buf, expected_len, prev_end, next, &comp_buf, &comp_cap) ||
             fwrite(block_buf, 1, expected_len, out) != expected_len) {
             ok = 0;
-            break;
+            continue;
         }
         bytes_written += expected_len;
         prev_end = next;
