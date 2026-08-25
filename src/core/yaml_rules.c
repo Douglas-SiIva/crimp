@@ -111,7 +111,7 @@ int crimp_yaml_rules_load_file(const char *path, crimp_yaml_rule_list *out) {
     }
 
     yaml_node_t *root = yaml_document_get_root_node(&doc);
-    yaml_node_t *rules_node = crimp_yaml_mapping_get(&doc, root, "rules");
+    const yaml_node_t *rules_node = crimp_yaml_mapping_get(&doc, root, "rules");
     if (!rules_node || rules_node->type != YAML_SEQUENCE_NODE) {
         yaml_document_delete(&doc);
         return -1;
@@ -123,7 +123,7 @@ int crimp_yaml_rules_load_file(const char *path, crimp_yaml_rule_list *out) {
     crimp_yaml_rule_list parsed;
     crimp_yaml_rule_list_init(&parsed);
     int ok = 1;
-    for (yaml_node_item_t *item = rules_node->data.sequence.items.start;
+    for (const yaml_node_item_t *item = rules_node->data.sequence.items.start;
          ok && item < rules_node->data.sequence.items.top; item++) {
         yaml_node_t *entry = yaml_document_get_node(&doc, *item);
         if (!entry || entry->type != YAML_MAPPING_NODE ||

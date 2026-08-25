@@ -35,11 +35,9 @@ int crimp_scan_directory(const char *root_path, const char *rules_dir,
         crimp_yaml_rule_list_free(&rules);
     }
 
-    if (cve_dataset_path != NULL) {
-        if (crimp_cve_match_components(cve_dataset_path, &result->components,
-                                        &result->findings) != 0) {
-            rc |= CRIMP_SCAN_CVE_DATASET_FAILED;
-        }
+    if (cve_dataset_path != NULL &&
+        crimp_cve_match_components(cve_dataset_path, &result->components, &result->findings) != 0) {
+        rc |= CRIMP_SCAN_CVE_DATASET_FAILED;
     }
 
     return rc;
