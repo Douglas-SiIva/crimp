@@ -10,12 +10,14 @@
 
 /* Component version markers can sit anywhere in a real firmware binary -
  * a 256KB read window (crimp_read_file_chunk's typical use) missed
- * BusyBox's version string sitting past that offset in a real device
- * image. Cap at 8MB instead: generous for the embedded binaries these
- * markers target (busybox/openssl/dropbear/kernel banners are all well
- * under this in practice), while still bounding memory for a
- * pathologically large file. */
-#define COMPONENT_SCAN_MAX (8 * 1024 * 1024)
+ * BusyBox's version string sitting at offset 277152 in a real device
+ * image. 2MB gives ~8x headroom over that proven real-world gap while
+ * keeping the per-file I/O/memory cost of scanning irrelevant large
+ * blobs (media, certs, secondary images) well short of a full-file
+ * read - the embedded binaries these markers actually target
+ * (busybox/openssl/dropbear/kernel banners) are comfortably under
+ * this in practice. */
+#define COMPONENT_SCAN_MAX (2 * 1024 * 1024)
 
 typedef struct {
     const char *marker;
@@ -93,6 +95,16 @@ static int looks_like_dropbear_version(const char *tok, size_t len) {
     return 1;
 }
 
+/* True if the NUL-delimited token buf[0..len) itself contains "dropbear"
+ * (case-insensitive isn't needed - real occurrences are "dropbear" or
+ * "Dropbear", never other casing). Used to require *some* positional
+ * relationship between a version-shaped token and actual Dropbear text,
+ * rather than trusting the shape alone anywhere in the file - see
+ * find_isolated_dropbear_version(). */
+static int token_mentions_dropbear(const char *tok, size_t len) {
+    return crimp_memfind(tok, len, "dropbear") != NULL || crimp_memfind(tok, len, "Dropbear") != NULL;
+}
+
 /* Confirmed against a real device firmware binary (GL.iNet GL-MT300N-V2,
  * OpenWrt 19.07.7): Dropbear's version literal ("2019.78") is stored as
  * its own isolated, NUL-terminated string constant, string-pool-adjacent
@@ -101,25 +113,86 @@ static int looks_like_dropbear_version(const char *tok, size_t len) {
  * "dropbear_" marker occurrences in the binary are config-path/ident
  * strings ("dropbear_rsa_host_key", "SSH-2.0-dropbear") with the version
  * substituted at runtime via a "%s" placeholder, never present as literal
- * text in the compiled binary. Scans the whole buffer (not windowed
- * around a marker occurrence, since the pooled string's position relative
- * to any specific marker hit isn't reliable) for the first NUL-delimited
- * token matching Dropbear's version shape. Returns 1 and fills `out` on
- * success, 0 if nothing matched. */
+ * text in the compiled binary.
+ *
+ * Trusting the version's shape alone anywhere in an up-to-2MB buffer
+ * risks misattributing an unrelated same-shaped token (a build/product
+ * ID, a timestamp code) elsewhere in the file. Instead, walks the
+ * buffer's NUL-delimited tokens and only accepts a version-shaped token
+ * whose immediate neighbor (previous or next token in the string table)
+ * itself mentions "dropbear" - exactly the real binary's layout, where
+ * the version sits directly next to "Dropbear SSH client v%s ..." in
+ * the pooled string table. Returns 1 and fills `out` on success, 0 if
+ * nothing matched. */
 static int find_isolated_dropbear_version(const char *buf, size_t n, char *out, size_t out_size) {
     size_t start = 0;
+    const char *prev_tok = NULL;
+    size_t prev_len = 0;
+    const char *candidate = NULL;
+    size_t candidate_len = 0;
+
     for (size_t i = 0; i <= n; i++) {
-        if (i == n || buf[i] == '\0') {
-            size_t len = i - start;
-            if (looks_like_dropbear_version(buf + start, len) && len < out_size) {
-                memcpy(out, buf + start, len);
+        if (i != n && buf[i] != '\0') {
+            continue;
+        }
+
+        const char *tok = buf + start;
+        size_t len = i - start;
+
+        if (candidate && token_mentions_dropbear(tok, len) && candidate_len < out_size) {
+            memcpy(out, candidate, candidate_len);
+            out[candidate_len] = '\0';
+            return 1;
+        }
+
+        if (looks_like_dropbear_version(tok, len)) {
+            if (prev_tok && token_mentions_dropbear(prev_tok, prev_len) && len < out_size) {
+                memcpy(out, tok, len);
                 out[len] = '\0';
                 return 1;
             }
-            start = i + 1;
+            candidate = tok;
+            candidate_len = len;
+        } else {
+            candidate = NULL;
+            candidate_len = 0;
         }
+
+        prev_tok = tok;
+        prev_len = len;
+        start = i + 1;
     }
     return 0;
+}
+
+/* ftell() returns a 32-bit `long` on Windows/MinGW (this project's
+ * primary build target), which can't represent an offset past ~2GB - a
+ * file larger than that would make plain fseek/ftell fail and silently
+ * skip the file entirely, even though only COMPONENT_SCAN_MAX bytes
+ * would actually be read. Same 64-bit-seek discipline already applied
+ * in src/extract/jffs2.c's file_size(); duplicated here in small form
+ * rather than pulled in as a dependency, since src/core doesn't (and
+ * shouldn't) depend on src/extract. */
+static long long file_size64(FILE *f) {
+#if defined(_WIN32)
+    if (_fseeki64(f, 0, SEEK_END) != 0) {
+        return -1;
+    }
+    return _ftelli64(f);
+#else
+    if (fseeko(f, 0, SEEK_END) != 0) {
+        return -1;
+    }
+    return (long long)ftello(f);
+#endif
+}
+
+static int seek_start64(FILE *f) {
+#if defined(_WIN32)
+    return _fseeki64(f, 0, SEEK_SET);
+#else
+    return fseeko(f, 0, SEEK_SET);
+#endif
 }
 
 /* Reads up to COMPONENT_SCAN_MAX bytes of `path` into a heap-allocated
@@ -132,12 +205,8 @@ static char *read_file_for_scan(const char *path, size_t *out_len) {
         return NULL;
     }
 
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return NULL;
-    }
-    long size = ftell(f);
-    if (size < 0 || fseek(f, 0, SEEK_SET) != 0) {
+    long long size = file_size64(f);
+    if (size < 0 || seek_start64(f) != 0) {
         fclose(f);
         return NULL;
     }

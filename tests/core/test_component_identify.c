@@ -68,8 +68,10 @@ static void write_large_offset_fixture(const char *dir, const char *filename) {
  * ("Dropbear SSH client v%s ..."), never concatenated with "dropbear_".
  * A naive "keep scanning marker occurrences for one followed by a
  * version" fix (the first attempt at this bug) still finds nothing here
- * - only find_isolated_dropbear_version()'s whole-buffer scan for the
- * version's own CalVer shape does. */
+ * - only find_isolated_dropbear_version()'s scan for a version-shaped
+ * token structurally adjacent (previous/next in the NUL-delimited string
+ * table) to actual "dropbear" text does, exactly this file's real
+ * layout. */
 static void write_dropbear_fixture(const char *dir, const char *filename) {
     char path[1024];
     snprintf(path, sizeof(path), "%s/%s", dir, filename);
@@ -92,6 +94,33 @@ static void write_dropbear_fixture(const char *dir, const char *filename) {
     fclose(f);
 }
 
+/* Regression against misattribution: a "dropbear_" marker occurrence
+ * with no adjacent version (confirming Dropbear is present), plus an
+ * unrelated NUL-delimited token elsewhere in the file that coincidentally
+ * matches Dropbear's "YYYY.NN" version shape (e.g. a build/product ID)
+ * but isn't structurally adjacent to any "dropbear" text. The scanner
+ * must not report this decoy as the Dropbear version. */
+static void write_dropbear_decoy_fixture(const char *dir, const char *filename) {
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s", dir, filename);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "failed to create fixture: %s\n", path);
+        exit(1);
+    }
+
+    fputs("/etc/dropbear/dropbear_rsa_host_key", f);
+    fputc('\0', f);
+    fputs("some unrelated build tag", f);
+    fputc('\0', f);
+    fputs("3021.42", f); /* shaped like a Dropbear version, but isn't one */
+    fputc('\0', f);
+    fputs("another unrelated string", f);
+
+    fclose(f);
+}
+
 int main(void) {
     const char *fixture_dir = "test_fixture_component_identify";
 #ifdef _WIN32
@@ -103,6 +132,7 @@ int main(void) {
     write_binary_fixture(fixture_dir, "busybox.bin");
     write_large_offset_fixture(fixture_dir, "busybox_large.bin");
     write_dropbear_fixture(fixture_dir, "dropbear.bin");
+    write_dropbear_decoy_fixture(fixture_dir, "dropbear_decoy.bin");
 
     crimp_component_list components;
     crimp_component_list_init(&components);
@@ -113,6 +143,7 @@ int main(void) {
     int saw_openssl = 0;
     int saw_busybox_large_offset = 0;
     int saw_dropbear = 0;
+    int decoy_misattributed = 0;
     for (size_t i = 0; i < components.count; i++) {
         printf("%s %s (%s)\n", components.items[i].component, components.items[i].version,
                components.items[i].path);
@@ -129,8 +160,14 @@ int main(void) {
             saw_busybox_large_offset = 1;
         }
         if (strcmp(components.items[i].component, "Dropbear") == 0 &&
-            strcmp(components.items[i].version, "2019.78") == 0) {
+            strcmp(components.items[i].version, "2019.78") == 0 &&
+            strstr(components.items[i].path, "dropbear.bin") != NULL) {
             saw_dropbear = 1;
+        }
+        if (strcmp(components.items[i].component, "Dropbear") == 0 &&
+            strstr(components.items[i].path, "dropbear_decoy.bin") != NULL &&
+            strcmp(components.items[i].version, "3021.42") == 0) {
+            decoy_misattributed = 1;
         }
     }
 
@@ -142,6 +179,12 @@ int main(void) {
                 "FAIL: expected BusyBox 1.31.1, OpenSSL 1.1.1k, BusyBox 1.33.0 (large offset), "
                 "and Dropbear 2019.78 (marker adjacency) identified, got %zu component(s)\n",
                 total);
+        return 1;
+    }
+    if (decoy_misattributed) {
+        fprintf(stderr,
+                "FAIL: Dropbear version misattributed from an unrelated shaped token not "
+                "adjacent to any \"dropbear\" text\n");
         return 1;
     }
 
