@@ -297,14 +297,13 @@ static int scan_log(FILE *f, uint64_t image_size, int big_endian, dirent_list *d
             return -1;
         }
 
-        if (nodetype == JFFS2_NODETYPE_DIRENT) {
-            if (parse_dirent_node(f, totlen, big_endian, dirents) != 0) {
-                return -1;
-            }
-        } else if (nodetype == JFFS2_NODETYPE_INODE) {
-            if (parse_inode_node(f, pos, totlen, big_endian, inodes) != 0) {
-                return -1;
-            }
+        if (nodetype == JFFS2_NODETYPE_DIRENT &&
+            parse_dirent_node(f, totlen, big_endian, dirents) != 0) {
+            return -1;
+        }
+        if (nodetype == JFFS2_NODETYPE_INODE &&
+            parse_inode_node(f, pos, totlen, big_endian, inodes) != 0) {
+            return -1;
         }
         /* Other node types (cleanmarker, summary, xattr, padding, ...):
          * skip - nothing else needed for extraction correctness, same
@@ -565,8 +564,10 @@ static int extract_regular_file(FILE *f, uint32_t ino, uint32_t final_isize,
         range_end++;
     }
 
-    for (size_t i = range_start; ok && i < range_end; i++) {
+    size_t i = range_start;
+    while (ok && i < range_end) {
         const jffs2_inode_rec *rec = &inodes->items[i];
+        i++;
         if (rec->dsize == 0) {
             continue;
         }
